@@ -6,7 +6,7 @@ from irrm_codec.tokenization import BOS_ID, EOS_ID, PAD_ID, UNK_ID, encode
 
 
 def validate_dataframe(df, emb_array, max_len=40, emb_dim=9000):
-    required_columns = {"clone_id", "junction_aa", "v_call", "j_call", "locus"}
+    required_columns = {"junction_aa", "v_call", "j_call", "locus"}
     missing_columns = required_columns.difference(df.columns)
     if missing_columns:
         missing = ", ".join(sorted(missing_columns))
@@ -47,7 +47,7 @@ def validate_dataframe(df, emb_array, max_len=40, emb_dim=9000):
     return {
         "num_samples": len(df),
         "embedding_dim": emb_array.shape[1],
-        "num_unique_clone_ids": int(df["clone_id"].nunique()),
+        "num_unique_clone_ids": int(df["clone_id"].nunique()) if "clone_id" in df.columns else int(len(df)),
         "min_length": int(min(sequence_lengths)),
         "max_length": int(max(sequence_lengths)),
         "mean_length": float(np.mean(sequence_lengths)),

@@ -1,4 +1,5 @@
 import argparse
+import time
 from pathlib import Path
 
 import numpy as np
@@ -17,6 +18,7 @@ from irrm_codec.utils import (
     save_checkpoint,
     save_json,
     set_seed,
+    setup_logging,
     split_indices,
     summarize_metrics,
 )
@@ -39,6 +41,7 @@ def parse_args():
     parser.add_argument("--val-fraction", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--log-interval", type=int, default=10)
     return parser.parse_args()
 
 
@@ -53,14 +56,16 @@ def build_dataloader(df, emb, batch_size, max_len, shuffle, num_workers):
     )
 
 
-def run_epoch(model, loader, optimizer, device):
+def run_epoch(model, loader, optimizer, device, logger, stage, epoch, log_interval):
     is_train = optimizer is not None
     model.train(mode=is_train)
 
     metric_sums = {"loss": 0.0, "mse": 0.0, "cosine": 0.0}
     steps = 0
+    total_steps = len(loader)
+    epoch_start = time.time()
 
-    for batch in loader:
+    for step, batch in enumerate(loader, start=1):
         tokens, mask, target, _lengths = move_to_device(batch, device)
         with torch.set_grad_enabled(is_train):
             pred = model(tokens, mask)
@@ -78,6 +83,21 @@ def run_epoch(model, loader, optimizer, device):
         metric_sums["cosine"] += metrics["cosine"]
         steps += 1
 
+        should_log = step == 1 or step == total_steps or (log_interval > 0 and step % log_interval == 0)
+        if should_log:
+            avg_metrics = summarize_metrics(metric_sums, steps)
+            logger.info(
+                "%s epoch=%d step=%d/%d loss=%.4f mse=%.4f cosine=%.4f elapsed=%.1fs",
+                stage,
+                epoch,
+                step,
+                total_steps,
+                avg_metrics["loss"],
+                avg_metrics["mse"],
+                avg_metrics["cosine"],
+                time.time() - epoch_start,
+            )
+
     return summarize_metrics(metric_sums, steps)
 
 
@@ -85,6 +105,22 @@ def main():
     args = parse_args()
     set_seed(args.seed)
     device = choose_device()
+    output_dir = Path(args.output_dir)
+    logger = setup_logging(output_dir / "train.log")
+
+    logger.info("starting forward training")
+    logger.info("output_dir=%s", output_dir.resolve())
+    logger.info("device=%s seed=%d", device, args.seed)
+    logger.info(
+        "hyperparameters batch_size=%d epochs=%d lr=%.6f weight_decay=%.6f max_len=%d num_workers=%d log_interval=%d",
+        args.batch_size,
+        args.epochs,
+        args.lr,
+        args.weight_decay,
+        args.max_len,
+        args.num_workers,
+        args.log_interval,
+    )
 
     df, emb, merge_stats = load_airr_with_embeddings(
         airr_path=args.airr_path,
@@ -127,8 +163,29 @@ def main():
 
     model = ForwardModel(output_dim=train_emb.shape[1]).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    num_parameters = sum(param.numel() for param in model.parameters())
+    num_trainable_parameters = sum(param.numel() for param in model.parameters() if param.requires_grad)
 
-    output_dir = Path(args.output_dir)
+    logger.info(
+        "loaded data total=%d train=%d val=%d test=%d embedding_dim=%d",
+        len(df),
+        len(train_df),
+        len(val_df),
+        len(test_df),
+        train_emb.shape[1],
+    )
+    logger.info(
+        "dataloader batches train=%d val=%d test=%d",
+        len(train_loader),
+        len(val_loader),
+        len(test_loader),
+    )
+    logger.info(
+        "model parameters total=%d trainable=%d",
+        num_parameters,
+        num_trainable_parameters,
+    )
+
     save_json(
         output_dir / "data_stats.json",
         {
@@ -149,8 +206,11 @@ def main():
     best_val_loss = float("inf")
     history = []
     for epoch in range(1, args.epochs + 1):
-        train_metrics = run_epoch(model, train_loader, optimizer, device)
-        val_metrics = run_epoch(model, val_loader, None, device)
+        logger.info("epoch %d/%d started", epoch, args.epochs)
+        train_metrics = run_epoch(
+            model, train_loader, optimizer, device, logger, "train", epoch, args.log_interval
+        )
+        val_metrics = run_epoch(model, val_loader, None, device, logger, "val", epoch, args.log_interval)
         history.append({"epoch": epoch, "train": train_metrics, "val": val_metrics})
 
         save_checkpoint(
@@ -161,6 +221,7 @@ def main():
             val_metrics,
             extra={"task": "forward", "max_len": args.max_len, "embedding_dim": train_emb.shape[1]},
         )
+        logger.info("saved checkpoint path=%s", output_dir / "last.pt")
 
         if val_metrics["loss"] < best_val_loss:
             best_val_loss = val_metrics["loss"]
@@ -172,18 +233,27 @@ def main():
                 val_metrics,
                 extra={"task": "forward", "max_len": args.max_len, "embedding_dim": train_emb.shape[1]},
             )
+            logger.info("new best checkpoint path=%s val_loss=%.4f", output_dir / "best.pt", best_val_loss)
 
-        print(
-            f"epoch={epoch} train_loss={train_metrics['loss']:.4f} "
-            f"val_loss={val_metrics['loss']:.4f} val_cosine={val_metrics['cosine']:.4f}"
+        logger.info(
+            "epoch=%d summary train_loss=%.4f train_mse=%.4f train_cosine=%.4f val_loss=%.4f val_mse=%.4f val_cosine=%.4f",
+            epoch,
+            train_metrics["loss"],
+            train_metrics["mse"],
+            train_metrics["cosine"],
+            val_metrics["loss"],
+            val_metrics["mse"],
+            val_metrics["cosine"],
         )
 
-    test_metrics = run_epoch(model, test_loader, None, device)
+    test_metrics = run_epoch(model, test_loader, None, device, logger, "test", args.epochs, args.log_interval)
     save_json(output_dir / "history.json", history)
     save_json(output_dir / "test_metrics.json", test_metrics)
-    print(
-        f"test_loss={test_metrics['loss']:.4f} "
-        f"test_mse={test_metrics['mse']:.4f} test_cosine={test_metrics['cosine']:.4f}"
+    logger.info(
+        "test summary loss=%.4f mse=%.4f cosine=%.4f",
+        test_metrics["loss"],
+        test_metrics["mse"],
+        test_metrics["cosine"],
     )
 
 

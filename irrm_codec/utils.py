@@ -1,4 +1,5 @@
 import json
+import logging
 import random
 from pathlib import Path
 
@@ -73,3 +74,19 @@ def summarize_metrics(metric_sums, steps):
     if steps == 0:
         return {}
     return {name: value / steps for name, value in metric_sums.items()}
+
+
+def setup_logging(log_path=None, level=logging.INFO):
+    handlers = [logging.StreamHandler()]
+    if log_path is not None:
+        log_path = Path(log_path)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        handlers.append(logging.FileHandler(log_path, encoding="utf-8"))
+
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s | %(levelname)s | %(message)s",
+        handlers=handlers,
+        force=True,
+    )
+    return logging.getLogger("irrm_codec")

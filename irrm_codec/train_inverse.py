@@ -1,4 +1,5 @@
 import argparse
+import time
 from pathlib import Path
 
 import numpy as np
@@ -18,6 +19,7 @@ from irrm_codec.utils import (
     save_checkpoint,
     save_json,
     set_seed,
+    setup_logging,
     split_indices,
     summarize_metrics,
 )
@@ -40,6 +42,7 @@ def parse_args():
     parser.add_argument("--val-fraction", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--log-interval", type=int, default=10)
     return parser.parse_args()
 
 
@@ -63,7 +66,7 @@ def exact_match_rate(pred_tokens, target_tokens):
     return exact_matches / max(total, 1)
 
 
-def run_epoch(model, loader, optimizer, device):
+def run_epoch(model, loader, optimizer, device, logger, stage, epoch, log_interval):
     is_train = optimizer is not None
     model.train(mode=is_train)
 
@@ -75,8 +78,10 @@ def run_epoch(model, loader, optimizer, device):
         "unk_fraction": 0.0,
     }
     steps = 0
+    total_steps = len(loader)
+    epoch_start = time.time()
 
-    for batch in loader:
+    for step, batch in enumerate(loader, start=1):
         emb, decoder_input, target, lengths, unk_fraction = move_to_device(batch, device)
         with torch.set_grad_enabled(is_train):
             logits, length_logits = model(emb, decoder_input)
@@ -100,6 +105,23 @@ def run_epoch(model, loader, optimizer, device):
         metric_sums["unk_fraction"] += float(unk_fraction.item())
         steps += 1
 
+        should_log = step == 1 or step == total_steps or (log_interval > 0 and step % log_interval == 0)
+        if should_log:
+            avg_metrics = summarize_metrics(metric_sums, steps)
+            logger.info(
+                "%s epoch=%d step=%d/%d loss=%.4f tok_acc=%.4f len_acc=%.4f exact=%.4f unk=%.4f elapsed=%.1fs",
+                stage,
+                epoch,
+                step,
+                total_steps,
+                avg_metrics["loss"],
+                avg_metrics["token_accuracy"],
+                avg_metrics["length_accuracy"],
+                avg_metrics["exact_match"],
+                avg_metrics["unk_fraction"],
+                time.time() - epoch_start,
+            )
+
     return summarize_metrics(metric_sums, steps)
 
 
@@ -107,6 +129,22 @@ def main():
     args = parse_args()
     set_seed(args.seed)
     device = choose_device()
+    output_dir = Path(args.output_dir)
+    logger = setup_logging(output_dir / "train.log")
+
+    logger.info("starting inverse training")
+    logger.info("output_dir=%s", output_dir.resolve())
+    logger.info("device=%s seed=%d", device, args.seed)
+    logger.info(
+        "hyperparameters batch_size=%d epochs=%d lr=%.6f weight_decay=%.6f max_len=%d num_workers=%d log_interval=%d",
+        args.batch_size,
+        args.epochs,
+        args.lr,
+        args.weight_decay,
+        args.max_len,
+        args.num_workers,
+        args.log_interval,
+    )
 
     df, emb, merge_stats = load_airr_with_embeddings(
         airr_path=args.airr_path,
@@ -149,8 +187,29 @@ def main():
 
     model = InverseModel(embedding_dim=train_emb.shape[1], max_len=args.max_len).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    num_parameters = sum(param.numel() for param in model.parameters())
+    num_trainable_parameters = sum(param.numel() for param in model.parameters() if param.requires_grad)
 
-    output_dir = Path(args.output_dir)
+    logger.info(
+        "loaded data total=%d train=%d val=%d test=%d embedding_dim=%d",
+        len(df),
+        len(train_df),
+        len(val_df),
+        len(test_df),
+        train_emb.shape[1],
+    )
+    logger.info(
+        "dataloader batches train=%d val=%d test=%d",
+        len(train_loader),
+        len(val_loader),
+        len(test_loader),
+    )
+    logger.info(
+        "model parameters total=%d trainable=%d",
+        num_parameters,
+        num_trainable_parameters,
+    )
+
     save_json(
         output_dir / "data_stats.json",
         {
@@ -171,8 +230,11 @@ def main():
     best_val_loss = float("inf")
     history = []
     for epoch in range(1, args.epochs + 1):
-        train_metrics = run_epoch(model, train_loader, optimizer, device)
-        val_metrics = run_epoch(model, val_loader, None, device)
+        logger.info("epoch %d/%d started", epoch, args.epochs)
+        train_metrics = run_epoch(
+            model, train_loader, optimizer, device, logger, "train", epoch, args.log_interval
+        )
+        val_metrics = run_epoch(model, val_loader, None, device, logger, "val", epoch, args.log_interval)
         history.append({"epoch": epoch, "train": train_metrics, "val": val_metrics})
 
         save_checkpoint(
@@ -183,6 +245,7 @@ def main():
             val_metrics,
             extra={"task": "inverse", "max_len": args.max_len, "embedding_dim": train_emb.shape[1]},
         )
+        logger.info("saved checkpoint path=%s", output_dir / "last.pt")
 
         if val_metrics["loss"] < best_val_loss:
             best_val_loss = val_metrics["loss"]
@@ -194,19 +257,30 @@ def main():
                 val_metrics,
                 extra={"task": "inverse", "max_len": args.max_len, "embedding_dim": train_emb.shape[1]},
             )
+            logger.info("new best checkpoint path=%s val_loss=%.4f", output_dir / "best.pt", best_val_loss)
 
-        print(
-            f"epoch={epoch} train_loss={train_metrics['loss']:.4f} "
-            f"val_loss={val_metrics['loss']:.4f} val_tok_acc={val_metrics['token_accuracy']:.4f} "
-            f"val_exact={val_metrics['exact_match']:.4f}"
+        logger.info(
+            "epoch=%d summary train_loss=%.4f train_tok_acc=%.4f train_len_acc=%.4f val_loss=%.4f val_tok_acc=%.4f val_len_acc=%.4f val_exact=%.4f",
+            epoch,
+            train_metrics["loss"],
+            train_metrics["token_accuracy"],
+            train_metrics["length_accuracy"],
+            val_metrics["loss"],
+            val_metrics["token_accuracy"],
+            val_metrics["length_accuracy"],
+            val_metrics["exact_match"],
         )
 
-    test_metrics = run_epoch(model, test_loader, None, device)
+    test_metrics = run_epoch(model, test_loader, None, device, logger, "test", args.epochs, args.log_interval)
     save_json(output_dir / "history.json", history)
     save_json(output_dir / "test_metrics.json", test_metrics)
-    print(
-        f"test_loss={test_metrics['loss']:.4f} test_tok_acc={test_metrics['token_accuracy']:.4f} "
-        f"test_len_acc={test_metrics['length_accuracy']:.4f} test_exact={test_metrics['exact_match']:.4f}"
+    logger.info(
+        "test summary loss=%.4f tok_acc=%.4f len_acc=%.4f exact=%.4f unk=%.4f",
+        test_metrics["loss"],
+        test_metrics["token_accuracy"],
+        test_metrics["length_accuracy"],
+        test_metrics["exact_match"],
+        test_metrics["unk_fraction"],
     )
 
 
