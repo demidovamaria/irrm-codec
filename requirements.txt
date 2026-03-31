@@ -1,0 +1,12 @@
+numpy
+pandas
+pyarrow
+fastparquet
+matplotlib
+seaborn
+scikit-learn
+jupyterlab
+notebook
+ipykernel
+ipywidgets
+torch

@@ -21,14 +21,15 @@ The repository is organized as a small training package with shell entrypoints a
 Create the conda environment:
 
 ```bash
-conda env create -f environment.yml
+conda create -n irrm-codec python=3.11 -y
 conda activate irrm-codec
+pip install -r requirements.txt
 ```
 
 Update the environment after dependency changes:
 
 ```bash
-conda env update -f environment.yml --prune
+pip install -r requirements.txt
 ```
 
 Register the environment as a Jupyter kernel:
@@ -36,6 +37,8 @@ Register the environment as a Jupyter kernel:
 ```bash
 python -m ipykernel install --user --name irrm-codec --display-name "Python (irrm-codec)"
 ```
+
+Project dependencies, including notebook packages, are installed from [requirements.txt](/c:/Users/lizzka239/projects/irrm-codec/requirements.txt).
 
 ## Input data
 
