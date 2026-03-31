@@ -28,10 +28,6 @@ pip install -r requirements.txt
 
 Update the environment after dependency changes:
 
-```bash
-pip install -r requirements.txt
-```
-
 Register the environment as a Jupyter kernel:
 
 ```bash
