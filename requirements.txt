@@ -1,3 +1,4 @@
+--extra-index-url https://download.pytorch.org/whl/cu121
 numpy
 pandas
 pyarrow
@@ -9,4 +10,4 @@ jupyterlab
 notebook
 ipykernel
 ipywidgets
-torch
+torch==2.4.1

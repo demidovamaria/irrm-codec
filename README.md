@@ -26,6 +26,8 @@ conda activate irrm-codec
 pip install -r requirements.txt
 ```
 
+`requirements.txt` pins `torch==2.4.1` and adds the PyTorch `cu121` wheel index to avoid pulling newer CUDA 13 builds that may require a newer NVIDIA driver.
+
 Update the environment after dependency changes:
 
 Register the environment as a Jupyter kernel:
@@ -51,25 +53,27 @@ Accepted formats:
 
 Required columns:
 
-- `clone_id`
 - `junction_aa`
 - `v_call`
 - `j_call`
 - `locus`
+
+Optional:
+
+- `clone_id`
 
 ### 2. TCRemP embeddings parquet
 
 Required:
 
 - parquet file
-- `clone_id` column
 
 Supported embedding layouts:
 
 - one column with vector values, for example `tcremp_emb`
 - many numeric embedding columns plus `clone_id`
 
-The AIRR table and embeddings table are merged by `clone_id` before training. Rows without a match are excluded, and merge statistics are saved to the run output.
+If AIRR contains `clone_id`, the AIRR table and embeddings table are merged by `clone_id`. If AIRR does not contain `clone_id` but the two tables have the same number of rows, embeddings are matched to AIRR rows by row order.
 
 ## Training
 
@@ -121,7 +125,7 @@ Useful optional flags:
 Both training scripts:
 
 - load AIRR and embeddings from separate files
-- merge them by `clone_id`
+- align them by `clone_id` or by row order when `clone_id` is absent and row counts match
 - filter by `locus`
 - validate sequence and embedding inputs
 - split data into train, validation and test subsets
