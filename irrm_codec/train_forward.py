@@ -161,7 +161,7 @@ def main():
         test_df, test_emb, args.batch_size, args.max_len, False, args.num_workers
     )
 
-    model = ForwardModel(output_dim=train_emb.shape[1]).to(device)
+    model = ForwardModel(output_dim=train_emb.shape[1], max_len=args.max_len).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     num_parameters = sum(param.numel() for param in model.parameters())
     num_trainable_parameters = sum(param.numel() for param in model.parameters() if param.requires_grad)

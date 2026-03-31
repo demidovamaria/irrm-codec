@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from irrm_codec.tokenization import PAD_ID, encode
+
 
 class ResidualBlock(nn.Module):
     def __init__(self, channels, dilation, dropout=0.1):
@@ -25,8 +27,9 @@ class ResidualBlock(nn.Module):
 
 
 class ForwardModel(nn.Module):
-    def __init__(self, vocab_size=24, embedding_dim=64, hidden_dim=256, output_dim=9000):
+    def __init__(self, vocab_size=24, embedding_dim=64, hidden_dim=256, output_dim=9000, max_len=40):
         super().__init__()
+        self.max_len = max_len
         self.emb = nn.Embedding(vocab_size, embedding_dim, padding_idx=0)
         self.proj = nn.Conv1d(embedding_dim, hidden_dim, 1)
         self.blocks = nn.ModuleList(
@@ -61,3 +64,31 @@ class ForwardModel(nn.Module):
         max_pool = x.masked_fill(~expanded_mask, torch.finfo(x.dtype).min).max(-1).values
         pooled = torch.cat([mean_pool, max_pool], dim=1)
         return self.mlp(pooled)
+
+    @torch.no_grad()
+    def predict(self, cdr3_list, device=None):
+        if isinstance(cdr3_list, str):
+            cdr3_list = [cdr3_list]
+        else:
+            cdr3_list = list(cdr3_list)
+
+        if not cdr3_list:
+            raise ValueError("cdr3_list must contain at least one sequence.")
+
+        model_device = next(self.parameters()).device if device is None else torch.device(device)
+        token_tensors = [
+            torch.tensor(encode(seq, max_len=self.max_len), dtype=torch.long) for seq in cdr3_list
+        ]
+        tokens = torch.nn.utils.rnn.pad_sequence(
+            token_tensors,
+            batch_first=True,
+            padding_value=PAD_ID,
+        ).to(model_device)
+        mask = tokens.ne(PAD_ID)
+
+        was_training = self.training
+        self.eval()
+        pred = self(tokens, mask)
+        if was_training:
+            self.train()
+        return pred
