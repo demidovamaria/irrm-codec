@@ -44,7 +44,7 @@ class ConvBlock(nn.Module):
 class ForwardModel(nn.Module):
     def __init__(
         self,
-        vocab_size=24,
+        vocab_size=25,
         embedding_dim=64,
         hidden_dim=192,
         mlp_dim=512,
@@ -53,7 +53,7 @@ class ForwardModel(nn.Module):
         dilations=(1, 2, 4, 8),
         encoder_type="residual",
         output_dim=9000,
-        max_len=40,
+        max_len=30,
     ):
         super().__init__()
         self.max_len = max_len

@@ -33,7 +33,7 @@ def parse_args():
     parser.add_argument("--locus", default="alpha")
     parser.add_argument("--clone-id-col", default="clone_id")
     parser.add_argument("--embedding-column", default="tcremp_emb")
-    parser.add_argument("--max-len", type=int, default=40)
+    parser.add_argument("--max-len", type=int, default=30)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--lr", type=float, default=3e-4)
@@ -62,7 +62,7 @@ def exact_match_rate(pred_tokens, target_tokens):
     exact_matches = 0
     total = pred_tokens.size(0)
     for pred_row, target_row in zip(pred_tokens.tolist(), target_tokens.tolist()):
-        if decode(pred_row) == decode(target_row):
+        if decode(pred_row, remove_gaps=True) == decode(target_row, remove_gaps=True):
             exact_matches += 1
     return exact_matches / max(total, 1)
 
@@ -90,11 +90,11 @@ def run_epoch(model, loader, optimizer, device, stage, epoch, num_epochs, log_in
     )
 
     for step, batch in enumerate(progress, start=1):
-        emb, target, lengths, unk_fraction = move_to_device(batch, device)
+        emb, target, unk_fraction = move_to_device(batch, device)
         with torch.set_grad_enabled(is_train):
-            logits, length_logits = model(emb)
-            loss = inverse_loss(logits, target, length_logits, lengths)
-            metrics = inverse_metrics(logits, target, length_logits, lengths)
+            logits = model(emb)
+            loss = inverse_loss(logits, target)
+            metrics = inverse_metrics(logits, target)
 
         if is_train:
             optimizer.zero_grad(set_to_none=True)
@@ -103,7 +103,7 @@ def run_epoch(model, loader, optimizer, device, stage, epoch, num_epochs, log_in
             optimizer.step()
             exact_match = 0.0
         else:
-            pred_tokens, _predicted_lengths = model.generate(emb, max_len=model.max_len)
+            pred_tokens = model.generate(emb, max_len=model.max_len)
             exact_match = exact_match_rate(pred_tokens, target)
 
         metric_sums["loss"] += loss.item()

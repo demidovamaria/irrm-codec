@@ -2,10 +2,10 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from irrm_codec.tokenization import EOS_ID, PAD_ID, UNK_ID, encode
+from irrm_codec.tokenization import PAD_ID, UNK_ID, VALID_AA, encode, gap_pad_cdr3
 
 
-def validate_dataframe(df, emb_array, max_len=40, emb_dim=9000):
+def validate_dataframe(df, emb_array, max_len=30, emb_dim=9000):
     required_columns = {"junction_aa", "v_call", "j_call", "locus"}
     missing_columns = required_columns.difference(df.columns)
     if missing_columns:
@@ -28,9 +28,11 @@ def validate_dataframe(df, emb_array, max_len=40, emb_dim=9000):
         raise ValueError("Embedding array contains NaN or infinite values.")
 
     sequence_lengths = []
+    processed_lengths = []
     unk_sequences = 0
     truncated_sequences = 0
     empty_sequences = 0
+    overlength_sequences = 0
 
     for raw_seq in df["junction_aa"].tolist():
         seq = "" if raw_seq is None else str(raw_seq).strip().upper()
@@ -38,11 +40,24 @@ def validate_dataframe(df, emb_array, max_len=40, emb_dim=9000):
             empty_sequences += 1
             continue
         sequence_lengths.append(len(seq))
-        unk_sequences += int(any(char not in "ACDEFGHIKLMNPQRSTVWY" for char in seq))
-        truncated_sequences += int(len(seq) > max_len)
+        unk_sequences += int(any(char not in VALID_AA for char in seq))
+        try:
+            processed_seq = gap_pad_cdr3(seq, target_len=max_len)
+        except ValueError as exc:
+            if "exceeds target length" in str(exc):
+                overlength_sequences += 1
+                truncated_sequences += 1
+                continue
+            raise
+        processed_lengths.append(len(processed_seq))
 
     if empty_sequences:
         raise ValueError(f"Found {empty_sequences} empty or missing sequences.")
+    if overlength_sequences:
+        raise ValueError(
+            f"Found {overlength_sequences} sequences longer than target length {max_len}; "
+            "they cannot be converted to fixed length by inserting gaps."
+        )
 
     return {
         "num_samples": len(df),
@@ -51,6 +66,9 @@ def validate_dataframe(df, emb_array, max_len=40, emb_dim=9000):
         "min_length": int(min(sequence_lengths)),
         "max_length": int(max(sequence_lengths)),
         "mean_length": float(np.mean(sequence_lengths)),
+        "processed_min_length": int(min(processed_lengths)),
+        "processed_max_length": int(max(processed_lengths)),
+        "processed_mean_length": float(np.mean(processed_lengths)),
         "truncated_fraction": truncated_sequences / len(df),
         "unk_sequence_fraction": unk_sequences / len(df),
         "max_len": max_len,
@@ -58,7 +76,7 @@ def validate_dataframe(df, emb_array, max_len=40, emb_dim=9000):
 
 
 class ForwardDataset(Dataset):
-    def __init__(self, df, emb_array, max_len=40):
+    def __init__(self, df, emb_array, max_len=30):
         self.seqs = df["junction_aa"].tolist()
         self.embs = np.asarray(emb_array, dtype=np.float32)
         self.max_len = max_len
@@ -76,7 +94,7 @@ class ForwardDataset(Dataset):
 
 
 class InverseDataset(Dataset):
-    def __init__(self, df, emb_array, max_len=40):
+    def __init__(self, df, emb_array, max_len=30):
         self.seqs = df["junction_aa"].tolist()
         self.embs = np.asarray(emb_array, dtype=np.float32)
         self.max_len = max_len
@@ -86,13 +104,10 @@ class InverseDataset(Dataset):
 
     def __getitem__(self, idx):
         tokens = encode(self.seqs[idx], self.max_len)
-        target = torch.full((self.max_len + 1,), PAD_ID, dtype=torch.long)
-        target[: len(tokens)] = torch.tensor(tokens, dtype=torch.long)
-        target[len(tokens)] = EOS_ID
+        target = torch.tensor(tokens, dtype=torch.long)
         return {
             "embedding": torch.from_numpy(self.embs[idx]),
             "target": target,
-            "length": len(tokens),
         }
 
 
@@ -111,7 +126,6 @@ def collate_forward(batch):
 def collate_inverse(batch):
     emb = torch.stack([item["embedding"] for item in batch])
     target = torch.stack([item["target"] for item in batch])
-    lengths = torch.tensor([item["length"] for item in batch], dtype=torch.long)
     target_mask = target.ne(PAD_ID)
     unk_fraction = target.eq(UNK_ID).logical_and(target_mask).float().sum() / target_mask.float().sum()
-    return emb, target, lengths, unk_fraction
+    return emb, target, unk_fraction
