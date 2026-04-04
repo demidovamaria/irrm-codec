@@ -5,7 +5,7 @@ from torch.utils.data import Dataset
 from irrm_codec.tokenization import PAD_ID, UNK_ID, VALID_AA, encode, gap_pad_cdr3
 
 
-def validate_dataframe(df, emb_array, max_len=30, emb_dim=9000):
+def validate_dataframe(df, emb_array, max_len=30, clone_id_col="clone_id"):
     required_columns = {"junction_aa", "v_call", "j_call", "locus"}
     missing_columns = required_columns.difference(df.columns)
     if missing_columns:
@@ -22,8 +22,6 @@ def validate_dataframe(df, emb_array, max_len=30, emb_dim=9000):
         raise ValueError(
             f"Embedding count {emb_array.shape[0]} does not match dataframe length {len(df)}."
         )
-    if emb_array.shape[1] != emb_dim:
-        raise ValueError(f"Expected embedding dimension {emb_dim}, got {emb_array.shape[1]}.")
     if not np.isfinite(emb_array).all():
         raise ValueError("Embedding array contains NaN or infinite values.")
 
@@ -62,7 +60,9 @@ def validate_dataframe(df, emb_array, max_len=30, emb_dim=9000):
     return {
         "num_samples": len(df),
         "embedding_dim": emb_array.shape[1],
-        "num_unique_clone_ids": int(df["clone_id"].nunique()) if "clone_id" in df.columns else int(len(df)),
+        "num_unique_clone_ids": (
+            int(df[clone_id_col].nunique()) if clone_id_col in df.columns else int(len(df))
+        ),
         "min_length": int(min(sequence_lengths)),
         "max_length": int(max(sequence_lengths)),
         "mean_length": float(np.mean(sequence_lengths)),

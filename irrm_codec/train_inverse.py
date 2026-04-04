@@ -32,7 +32,6 @@ def parse_args():
     parser.add_argument("--output-dir", default="artifacts/inverse")
     parser.add_argument("--locus", default="alpha")
     parser.add_argument("--clone-id-col", default="clone_id")
-    parser.add_argument("--embedding-column", default="tcremp_emb")
     parser.add_argument("--max-len", type=int, default=30)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--epochs", type=int, default=20)
@@ -154,9 +153,13 @@ def main():
         embeddings_path=args.embeddings_path,
         locus=args.locus,
         clone_id_col=args.clone_id_col,
-        embedding_column=args.embedding_column,
     )
-    data_stats = validate_dataframe(df, emb, max_len=args.max_len)
+    data_stats = validate_dataframe(
+        df,
+        emb,
+        max_len=args.max_len,
+        clone_id_col=args.clone_id_col,
+    )
 
     train_idx, val_idx, test_idx = split_indices(
         len(df),

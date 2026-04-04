@@ -52,48 +52,15 @@ def read_airr_table(path, clone_id_col="clone_id"):
     return df.copy()
 
 
-def extract_embedding_matrix(df, clone_id_col="clone_id", embedding_column="tcremp_emb"):
-    if clone_id_col not in df.columns:
-        raise ValueError(f"Embeddings table must contain '{clone_id_col}'.")
-    if df[clone_id_col].isna().any():
-        raise ValueError("Embeddings table contains missing clone_id values.")
-    if df[clone_id_col].duplicated().any():
-        raise ValueError("Embeddings table contains duplicate clone_id values.")
-
-    if embedding_column in df.columns:
-        matrix = np.stack(df[embedding_column].values).astype(np.float32)
-        embedding_df = df[[clone_id_col]].copy()
-    else:
-        numeric_columns = [
-            column
-            for column in df.columns
-            if column != clone_id_col and pd.api.types.is_numeric_dtype(df[column])
-        ]
-        if not numeric_columns:
-            raise ValueError(
-                f"Embeddings table must contain '{embedding_column}' or numeric embedding columns."
-            )
-        matrix = df[numeric_columns].to_numpy(dtype=np.float32)
-        embedding_df = df[[clone_id_col]].copy()
-
-    if matrix.ndim != 2:
-        raise ValueError(f"Expected 2D embeddings matrix, got shape {matrix.shape}.")
-    if not np.isfinite(matrix).all():
-        raise ValueError("Embeddings matrix contains NaN or infinite values.")
-
-    return embedding_df, matrix
-
-
-def get_embedding_matrix(df, embedding_column="tcremp_emb"):
-    if embedding_column in df.columns:
-        matrix = np.stack(df[embedding_column].values).astype(np.float32)
-    else:
-        numeric_columns = [column for column in df.columns if pd.api.types.is_numeric_dtype(df[column])]
-        if not numeric_columns:
-            raise ValueError(
-                f"Embeddings table must contain '{embedding_column}' or numeric embedding columns."
-            )
-        matrix = df[numeric_columns].to_numpy(dtype=np.float32)
+def extract_embedding_matrix(df, clone_id_col="clone_id"):
+    numeric_columns = [
+        column
+        for column in df.columns
+        if column != clone_id_col and pd.api.types.is_numeric_dtype(df[column])
+    ]
+    if not numeric_columns:
+        raise ValueError("Embeddings table must contain numeric embedding columns.")
+    matrix = df[numeric_columns].to_numpy(dtype=np.float32)
 
     if matrix.ndim != 2:
         raise ValueError(f"Expected 2D embeddings matrix, got shape {matrix.shape}.")
@@ -107,7 +74,6 @@ def load_airr_with_embeddings(
     embeddings_path,
     locus=None,
     clone_id_col="clone_id",
-    embedding_column="tcremp_emb",
 ):
     airr_df = read_airr_table(airr_path, clone_id_col=clone_id_col)
     airr_rows_before_locus = len(airr_df)
@@ -126,14 +92,32 @@ def load_airr_with_embeddings(
         merged = airr_df.copy().reset_index(drop=True)
         if clone_id_col not in merged.columns:
             merged[clone_id_col] = np.arange(len(merged)).astype(str)
-        emb = get_embedding_matrix(embeddings_raw, embedding_column=embedding_column)
-        use_row_alignment = True
-    else:
-        embeddings_df, emb_matrix = extract_embedding_matrix(
+        emb = extract_embedding_matrix(
             embeddings_raw,
             clone_id_col=clone_id_col,
-            embedding_column=embedding_column,
         )
+        use_row_alignment = True
+    else:
+        if clone_id_col not in embeddings_raw.columns:
+            raise ValueError(
+                "Embeddings table does not contain "
+                f"'{clone_id_col}', so merge by id is impossible. "
+                f"Row-order alignment is only allowed when row counts match exactly: "
+                f"AIRR before locus filter={airr_rows_before_locus}, "
+                f"AIRR after locus filter={len(airr_df)}, "
+                f"embeddings={len(embeddings_raw)}, "
+                f"locus={locus!r}."
+            )
+        if embeddings_raw[clone_id_col].isna().any():
+            raise ValueError("Embeddings table contains missing clone_id values.")
+        if embeddings_raw[clone_id_col].duplicated().any():
+            raise ValueError("Embeddings table contains duplicate clone_id values.")
+
+        emb_matrix = extract_embedding_matrix(
+            embeddings_raw,
+            clone_id_col=clone_id_col,
+        )
+        embeddings_df = embeddings_raw[[clone_id_col]].copy()
         embeddings_df["_embedding_index"] = np.arange(len(embeddings_df))
 
         merged = airr_df.merge(
@@ -169,7 +153,6 @@ def load_airr_with_embeddings(
         "airr_unmatched_rows": int(len(airr_df) - len(merged)),
         "embeddings_unmatched_rows": int(len(embeddings_raw) - len(merged)),
         "clone_id_column": clone_id_col,
-        "embedding_column": embedding_column if embedding_column in embeddings_raw.columns else None,
         "alignment_mode": "row_order" if use_row_alignment else "clone_id",
     }
     return merged, emb, stats
