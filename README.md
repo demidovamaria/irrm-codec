@@ -115,7 +115,7 @@ Useful optional flags:
 
 - `--clone-id-col clone_id`
 - `--embedding-column tcremp_emb`
-- `--max-len 30`
+- `--max-len 40`
 - `--batch-size ...`
 - `--epochs ...`
 - `--seed 42`
@@ -162,7 +162,7 @@ The example notebook [notebooks/example_run_and_analysis.ipynb](/c:/Users/lizzka
 
 ## Notes
 
-- The inverse model predicts the full fixed-length token sequence of length 30 in parallel.
+- The inverse model predicts the full fixed-length token sequence of length 40 in parallel.
 - The current pipeline expects one chain at a time and uses `locus` filtering to select it.
-- By default, CDR3 sequences are converted to fixed length 30 before tokenization by inserting `-` gaps after residue 4 and before the last 3 residues.
+- By default, CDR3 sequences are converted to fixed length 40 before tokenization by inserting `-` gaps after residue 4 and before the last 3 residues.
 - Training outputs are intentionally ignored by git via [`.gitignore`](/c:/Users/lizzka239/projects/irrm-codec/.gitignore#L1).

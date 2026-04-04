@@ -32,7 +32,7 @@ def parse_args():
     parser.add_argument("--output-dir", default="artifacts/inverse")
     parser.add_argument("--locus", default="alpha")
     parser.add_argument("--clone-id-col", default="clone_id")
-    parser.add_argument("--max-len", type=int, default=30)
+    parser.add_argument("--max-len", type=int, default=40)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--lr", type=float, default=3e-4)

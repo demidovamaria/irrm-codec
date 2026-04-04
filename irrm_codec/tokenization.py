@@ -46,7 +46,7 @@ def normalize_sequence(seq):
     return seq
 
 
-def gap_pad_cdr3(seq, target_len=30, left_anchor=4, right_anchor=3):
+def gap_pad_cdr3(seq, target_len=40, left_anchor=4, right_anchor=3):
     normalized = normalize_sequence(seq)
     if any(char not in VALID_AA for char in normalized):
         invalid = sorted({char for char in normalized if char not in VALID_AA})
@@ -70,7 +70,7 @@ def gap_pad_cdr3(seq, target_len=30, left_anchor=4, right_anchor=3):
     return f"{left}{GAP_TOKEN * left_gaps}{middle}{GAP_TOKEN * right_gaps}{right}"
 
 
-def encode(seq, max_len=30):
+def encode(seq, max_len=40):
     normalized = gap_pad_cdr3(seq, target_len=max_len)
     tokens = [AA_VOCAB.get(char, UNK_ID) for char in normalized]
     return tokens[:max_len]

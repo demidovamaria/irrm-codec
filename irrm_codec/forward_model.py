@@ -53,7 +53,7 @@ class ForwardModel(nn.Module):
         dilations=(1, 2, 4, 8),
         encoder_type="residual",
         output_dim=9000,
-        max_len=30,
+        max_len=40,
     ):
         super().__init__()
         self.max_len = max_len

@@ -58,7 +58,7 @@ echo "locus=$LOCUS"
   --locus "$LOCUS" \
   --clone-id-col clone_id \
   --embedding-column tcremp_emb \
-  --max-len 30 \
+  --max-len 40 \
   --batch-size 256 \
   --epochs 40 \
   --lr 1e-3 \

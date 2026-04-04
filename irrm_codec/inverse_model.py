@@ -7,7 +7,7 @@ class InverseModel(nn.Module):
         vocab_size=25,
         embedding_dim=9000,
         hidden_dim=512,
-        max_len=30,
+        max_len=40,
         dropout=0.2,
         num_layers=3,
         nhead=8,

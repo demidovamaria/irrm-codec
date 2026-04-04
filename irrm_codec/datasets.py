@@ -5,7 +5,7 @@ from torch.utils.data import Dataset
 from irrm_codec.tokenization import PAD_ID, UNK_ID, VALID_AA, encode, gap_pad_cdr3
 
 
-def validate_dataframe(df, emb_array, max_len=30, clone_id_col="clone_id"):
+def validate_dataframe(df, emb_array, max_len=40, clone_id_col="clone_id"):
     required_columns = {"junction_aa", "v_call", "j_call", "locus"}
     missing_columns = required_columns.difference(df.columns)
     if missing_columns:
@@ -76,7 +76,7 @@ def validate_dataframe(df, emb_array, max_len=30, clone_id_col="clone_id"):
 
 
 class ForwardDataset(Dataset):
-    def __init__(self, df, emb_array, max_len=30):
+    def __init__(self, df, emb_array, max_len=40):
         self.seqs = df["junction_aa"].tolist()
         self.embs = np.asarray(emb_array, dtype=np.float32)
         self.max_len = max_len
@@ -94,7 +94,7 @@ class ForwardDataset(Dataset):
 
 
 class InverseDataset(Dataset):
-    def __init__(self, df, emb_array, max_len=30):
+    def __init__(self, df, emb_array, max_len=40):
         self.seqs = df["junction_aa"].tolist()
         self.embs = np.asarray(emb_array, dtype=np.float32)
         self.max_len = max_len

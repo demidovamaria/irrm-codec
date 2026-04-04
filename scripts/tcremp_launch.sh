@@ -17,6 +17,8 @@ CHAIN_LOWER="${CHAIN,,}"
 INPUT_DIR="/projects/immunestatus/vdjrearm/airr_format"
 INPUT="${INPUT_DIR}/${CHAIN_LOWER}_background_100k.tsv"
 OUTDIR="/projects/immunestatus/vdjrearm/tcremp/"
+MIN_CDR3_LEN=7
+MAX_CDR3_LEN=40
 
 mkdir -p "$OUTDIR" /projects/immunestatus/vdjrearm/tcremp/logs
 
@@ -27,4 +29,6 @@ tcremp-run \
   -c "$CHAIN" \
   -s HomoSapiens \
   -np "$SLURM_CPUS_PER_TASK" \
+  --lower-len-cdr3 "$MIN_CDR3_LEN" \
+  --higher-len-cdr3 "$MAX_CDR3_LEN" \
   --skip-clustering
