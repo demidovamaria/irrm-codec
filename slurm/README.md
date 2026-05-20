@@ -30,3 +30,25 @@ If your cluster needs a different queue or resources, edit the `#SBATCH` lines a
 - `--time`
 
 Logs go to `slurm/logs/`.
+
+`slurm/calc_pgen_1mm.sbatch` runs 1-mismatch pgen calculation on an AIRR table using
+`mirpy`'s OLGA wrapper.
+
+Example:
+
+```bash
+sbatch \
+  --export=ALL,AIRR_PATH=/projects/immunestatus/vdjrearm/airr_format/trb_background_100k.tsv,OUTPUT_PATH=/projects/immunestatus/vdjrearm/pgen/trb_background_100k_pgen.tsv,CHAIN=TRB,LOCUS=beta,THREADS=8,BATCH_SIZE=2048,PYTHON_BIN=/home/evlasova/.conda/envs/irrm-codec/bin/python \
+  slurm/calc_pgen_1mm.sbatch
+```
+
+Important environment variables:
+
+- `AIRR_PATH`: input AIRR table
+- `OUTPUT_PATH`: output file (`.tsv`, `.airr`, `.csv`, or `.parquet`)
+- `CHAIN`: OLGA chain name, default `TRB`
+- `LOCUS`: optional AIRR locus filter
+- `MODEL_PATH`: optional explicit OLGA model directory
+- `MIRPY_PATH`: optional local mirpy checkout, default `../mirpy`
+- `THREADS`: number of worker threads
+- `BATCH_SIZE`: sequences per inner batch

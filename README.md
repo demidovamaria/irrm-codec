@@ -122,6 +122,30 @@ Useful optional flags:
 - `--log-interval 10`
 - `--no-progress`
 
+## 1mm pgen calculation
+
+Use the dedicated module to compute 1-mismatch pgen values through `mirpy`'s
+`mir.basic.pgen.OlgaModel.compute_pgen_cdr3aa_1mm`.
+
+Example:
+
+```bash
+python -m irrm_codec.calc_pgen_1mm \
+  --airr-path data/sample_airr.tsv \
+  --output-path artifacts/pgen/sample_airr_pgen.tsv \
+  --chain TRB \
+  --locus beta \
+  --threads 8 \
+  --batch-size 1024
+```
+
+Notes:
+
+- The input AIRR file is split into contiguous chunks across `--threads`.
+- Each worker thread creates its OLGA model lazily and reuses it for all batches in that thread.
+- The output table keeps the original AIRR columns and appends `pgen_1mm` and `log10_pgen_1mm`.
+- If `mirpy` is not installed into the environment, the script will also look for a local checkout at `../mirpy`.
+
 ## What the training scripts do
 
 Both training scripts:
