@@ -140,12 +140,14 @@ python -m irrm_codec.calc_pgen_1mm \
   --species human \
   --locus beta \
   --threads 8 \
+  --chunk-size 1000 \
   --batch-size 1024
 ```
 
 Notes:
 
 - The input AIRR file is split into contiguous chunks across `--threads`.
+- Chunk size is controlled separately by `--chunk-size`, so many small chunks can be processed in parallel and saved immediately.
 - Each worker thread creates its OLGA model lazily and reuses it for all batches in that thread.
 - Completed chunks are saved immediately into `OUTPUT_PATH.chunks/`, so reruns resume from already computed chunks.
 - The output table keeps the original AIRR columns and appends `pgen_1mm` and `log10_pgen_1mm`.

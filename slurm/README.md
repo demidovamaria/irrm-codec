@@ -59,6 +59,7 @@ Important environment variables:
 - `MODEL_PATH`: optional explicit OLGA model directory
 - `MIRPY_PATH`: optional local mirpy checkout, default `../mirpy`
 - `THREADS`: number of worker threads
+- `CHUNK_SIZE`: sequences per saved chunk, default `1000`
 - `BATCH_SIZE`: sequences per inner batch
 
 `slurm/calc_pgen_1mm_background_100k_array.sbatch` computes `1mm pgen` for all seven chains

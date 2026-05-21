@@ -49,6 +49,7 @@ echo "species=human"
 echo "airr_path=$AIRR_PATH"
 echo "output_path=$OUTPUT_PATH"
 echo "locus=$LOCUS"
+echo "threads=${SLURM_CPUS_PER_TASK:-32} chunk_size=${CHUNK_SIZE:-1000}"
 
 "python" -m irrm_codec.calc_pgen_1mm \
   --airr-path "$AIRR_PATH" \
@@ -59,5 +60,6 @@ echo "locus=$LOCUS"
   --clone-id-col clone_id \
   --cdr3-col junction_aa \
   --threads "${SLURM_CPUS_PER_TASK:-32}" \
+  --chunk-size "${CHUNK_SIZE:-1000}" \
   --batch-size 2048 \
   --mirpy-path "$MIRPY_PATH"
