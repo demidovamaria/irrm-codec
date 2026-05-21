@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=irrm-pgen-1mm
-#SBATCH --partition=short
+#SBATCH --partition=medium
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=32G
-#SBATCH --time=04:00:00
+#SBATCH --time=08:00:00
 #SBATCH --output=slurm/logs/%x-%j.out
 #SBATCH --error=slurm/logs/%x-%j.err
 

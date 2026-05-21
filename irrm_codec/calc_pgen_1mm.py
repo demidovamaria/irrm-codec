@@ -248,6 +248,68 @@ def _save_stats(stats_path, payload):
     stats_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+def _chunk_store_dir(output_path):
+    output_path = Path(output_path)
+    return output_path.parent / f"{output_path.name}.chunks"
+
+
+def _chunk_file_path(output_path, chunk_id):
+    return _chunk_store_dir(output_path) / f"chunk_{chunk_id:04d}.parquet"
+
+
+def _progress_file_path(output_path):
+    return _chunk_store_dir(output_path) / "progress.json"
+
+
+def _write_chunk_result(output_path, chunk_id, start, end, values):
+    chunk_dir = _chunk_store_dir(output_path)
+    chunk_dir.mkdir(parents=True, exist_ok=True)
+    chunk_df = pd.DataFrame(
+        {
+            "row_index": np.arange(start, end, dtype=np.int64),
+            "pgen_1mm": np.asarray(values, dtype=np.float64),
+        }
+    )
+    chunk_df.to_parquet(_chunk_file_path(output_path, chunk_id), index=False)
+
+
+def _load_existing_chunk(output_path, chunk_id, expected_start, expected_end):
+    chunk_path = _chunk_file_path(output_path, chunk_id)
+    if not chunk_path.exists():
+        return None
+    chunk_df = pd.read_parquet(chunk_path)
+    if list(chunk_df.columns) != ["row_index", "pgen_1mm"]:
+        raise ValueError(f"Unexpected chunk schema in {chunk_path}.")
+    expected_len = expected_end - expected_start
+    if len(chunk_df) != expected_len:
+        raise ValueError(
+            f"Chunk file {chunk_path} has {len(chunk_df)} rows, expected {expected_len}."
+        )
+    expected_index = np.arange(expected_start, expected_end, dtype=np.int64)
+    if not np.array_equal(chunk_df["row_index"].to_numpy(dtype=np.int64), expected_index):
+        raise ValueError(f"Chunk file {chunk_path} row indexes do not match expected bounds.")
+    return chunk_df["pgen_1mm"].to_numpy(dtype=np.float64)
+
+
+def _write_progress(output_path, payload):
+    progress_path = _progress_file_path(output_path)
+    progress_path.parent.mkdir(parents=True, exist_ok=True)
+    progress_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _assemble_from_chunks(df, output_path, pgen_col, log10_pgen_col, chunk_bounds):
+    pgen_values = np.empty(len(df), dtype=np.float64)
+    for chunk_id, (start, end) in enumerate(chunk_bounds):
+        values = _load_existing_chunk(output_path, chunk_id, start, end)
+        if values is None:
+            raise ValueError(f"Missing expected chunk {chunk_id} for final assembly.")
+        pgen_values[start:end] = values
+    result_df = df.copy()
+    result_df[pgen_col] = pgen_values
+    result_df[log10_pgen_col] = np.array([_log10_or_neg_inf(value) for value in pgen_values], dtype=np.float64)
+    return result_df
+
+
 def main():
     args = parse_args()
     if args.threads < 1:
@@ -263,8 +325,10 @@ def main():
     df, sequences, input_stats = _read_and_filter_airr(args)
     num_rows = len(df)
     chunk_bounds = _chunk_bounds(num_rows, args.threads)
-    pgen_values = np.empty(num_rows, dtype=np.float64)
     is_d_present = _parse_is_d_present(args.is_d_present)
+    output_path = Path(args.output_path)
+    completed_chunk_ids = []
+    pending_chunks = []
 
     logger.info(
         "loaded rows=%d chain=%s locus=%s threads=%d batch_size=%d",
@@ -275,7 +339,33 @@ def main():
         args.batch_size,
     )
 
-    with ThreadPoolExecutor(max_workers=len(chunk_bounds) or 1) as executor:
+    for chunk_id, (start, end) in enumerate(chunk_bounds):
+        existing_values = _load_existing_chunk(output_path, chunk_id, start, end)
+        if existing_values is not None:
+            completed_chunk_ids.append(chunk_id)
+            logger.info(
+                "reused chunk=%d start=%d end=%d rows=%d",
+                chunk_id,
+                start,
+                end,
+                end - start,
+            )
+        else:
+            pending_chunks.append((chunk_id, start, end))
+
+    _write_progress(
+        output_path,
+        {
+            **input_stats,
+            "rows_total": int(num_rows),
+            "threads_requested": int(args.threads),
+            "chunk_count": int(len(chunk_bounds)),
+            "completed_chunks": completed_chunk_ids,
+            "pending_chunks": [chunk_id for chunk_id, _start, _end in pending_chunks],
+        },
+    )
+
+    with ThreadPoolExecutor(max_workers=min(len(pending_chunks), len(chunk_bounds)) or 1) as executor:
         futures = [
             executor.submit(
                 _compute_chunk,
@@ -290,22 +380,38 @@ def main():
                 args.mirpy_path,
                 args.batch_size,
             )
-            for chunk_id, (start, end) in enumerate(chunk_bounds)
+            for chunk_id, start, end in pending_chunks
         ]
         for future in futures:
             chunk_id, start, values = future.result()
-            pgen_values[start : start + len(values)] = values
+            end = start + len(values)
+            _write_chunk_result(output_path, chunk_id, start, end, values)
+            completed_chunk_ids.append(chunk_id)
+            _write_progress(
+                output_path,
+                {
+                    **input_stats,
+                    "rows_total": int(num_rows),
+                    "threads_requested": int(args.threads),
+                    "chunk_count": int(len(chunk_bounds)),
+                    "completed_chunks": sorted(completed_chunk_ids),
+                    "pending_chunks": sorted(
+                        chunk_idx
+                        for chunk_idx, _start, _end in pending_chunks
+                        if chunk_idx not in completed_chunk_ids
+                    ),
+                },
+            )
             logger.info(
                 "completed chunk=%d start=%d end=%d rows=%d",
                 chunk_id,
                 start,
-                start + len(values),
+                end,
                 len(values),
             )
 
-    df[args.pgen_col] = pgen_values
-    df[args.log10_pgen_col] = np.array([_log10_or_neg_inf(value) for value in pgen_values], dtype=np.float64)
-    _save_table(df, output_path)
+    result_df = _assemble_from_chunks(df, output_path, args.pgen_col, args.log10_pgen_col, chunk_bounds)
+    _save_table(result_df, output_path)
 
     stats_payload = {
         **input_stats,
@@ -315,12 +421,14 @@ def main():
             if args.output_stats_path
             else output_path.with_suffix(output_path.suffix + ".stats.json").resolve()
         ),
-        "rows_written": int(len(df)),
+        "rows_written": int(len(result_df)),
         "threads": int(len(chunk_bounds)),
         "batch_size": int(args.batch_size),
         "model_path": str(Path(args.model_path).resolve()) if args.model_path else None,
         "mirpy_path": str(Path(args.mirpy_path).resolve()) if args.mirpy_path else None,
         "is_d_present": is_d_present,
+        "chunk_store_dir": str(_chunk_store_dir(output_path).resolve()),
+        "chunk_count": int(len(chunk_bounds)),
         "pgen_column": args.pgen_col,
         "log10_pgen_column": args.log10_pgen_col,
     }

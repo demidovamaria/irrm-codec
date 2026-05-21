@@ -34,6 +34,13 @@ Logs go to `slurm/logs/`.
 `slurm/calc_pgen_1mm.sbatch` runs 1-mismatch pgen calculation on an AIRR table using
 `mirpy`'s OLGA wrapper.
 
+The default Slurm resources are now:
+
+- partition: `medium`
+- time limit: `08:00:00`
+- CPUs per task: `32`
+- memory: `32G`
+
 Example:
 
 ```bash
