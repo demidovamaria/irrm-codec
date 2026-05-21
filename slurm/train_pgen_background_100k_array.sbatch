@@ -12,7 +12,8 @@
 
 set -euo pipefail
 
-cd ../
+ROOT_DIR="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+cd "$ROOT_DIR"
 
 CHAINS=(TRB TRA TRG TRD IGH IGK IGL)
 CHAIN="${CHAINS[$SLURM_ARRAY_TASK_ID]}"
@@ -43,6 +44,7 @@ mkdir -p "$OUTPUT_DIR" "$LOG_DIR"
 
 echo "job_id=${SLURM_JOB_ID:-local}"
 echo "array_task_id=${SLURM_ARRAY_TASK_ID:-0}"
+echo "root_dir=$ROOT_DIR"
 echo "chain=$CHAIN"
 echo "airr_path=$AIRR_PATH"
 echo "output_dir=$OUTPUT_DIR"
