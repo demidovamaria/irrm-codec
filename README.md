@@ -140,16 +140,15 @@ python -m irrm_codec.calc_pgen_1mm \
   --species human \
   --locus beta \
   --threads 8 \
-  --chunk-size 1000 \
-  --batch-size 1024
+  --chunk-size 1000
 ```
 
 Notes:
 
-- The input AIRR file is split into contiguous chunks across `--threads`.
-- Chunk size is controlled separately by `--chunk-size`, so many small chunks can be processed in parallel and saved immediately.
-- Each worker thread creates its OLGA model lazily and reuses it for all batches in that thread.
-- Completed chunks are saved immediately into `OUTPUT_PATH.chunks/`, so reruns resume from already computed chunks.
+- `--threads` controls how many independent worker processes run in parallel.
+- Each worker gets its own contiguous part of the filtered AIRR table, reads the AIRR file inside the child process, and never receives a shared in-memory sequence list from the parent.
+- `--chunk-size` controls how many sequences a worker processes before flushing an intermediate result chunk to disk.
+- Completed chunks are reused on rerun, so a killed job resumes from the last successful on-disk save.
 - The output table keeps the original AIRR columns and appends `pgen_1mm` and `log10_pgen_1mm`.
 - The code is compatible with the current `mirpy-lib` package and falls back to a local checkout at `../mirpy` when needed.
 
