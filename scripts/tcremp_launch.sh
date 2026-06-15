@@ -4,13 +4,14 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=32G
 #SBATCH --time=2:00:00
-#SBATCH --array=0-4
+#SBATCH --array=0-0
 #SBATCH --output=/projects/immunestatus/vdjrearm/tcremp/logs/%x_%A_%a.out
 #SBATCH --error=/projects/immunestatus/vdjrearm/tcremp/logs/%x_%A_%a.err
 
 set -euo pipefail
 
-CHAINS=(TRG TRD IGH IGK IGL)
+# CHAINS=(TRG TRD IGH IGK IGL)
+CHAINS=(TRB)
 CHAIN="${CHAINS[$SLURM_ARRAY_TASK_ID]}"
 CHAIN_LOWER="${CHAIN,,}"
 

@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=irrm-pgen-1mm-bg100k
-#SBATCH --partition=medium
-#SBATCH --cpus-per-task=32
-#SBATCH --mem=32G
-#SBATCH --time=08:00:00
-#SBATCH --array=0-6
+#SBATCH --partition=short
+#SBATCH --constraint=gpu
+#SBATCH --gres=gpu:1
+#SBATCH --time=02:00:00
+#SBATCH --cpus-per-task=8         # Run on a single CPU
+#SBATCH --mem=16gb  
+#SBATCH --array=0-0
 #SBATCH --output=/projects/immunestatus/vdjrearm/irrmcodec/logs/%x_%A_%a.out
 #SBATCH --error=/projects/immunestatus/vdjrearm/irrmcodec/logs/%x_%A_%a.err
 
@@ -13,7 +15,7 @@ set -euo pipefail
 ROOT_DIR="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "$ROOT_DIR"
 
-CHAINS=(TRB TRA TRG TRD IGH IGK IGL)
+CHAINS=(TRB)
 CHAIN="${CHAINS[$SLURM_ARRAY_TASK_ID]}"
 CHAIN_LOWER="${CHAIN,,}"
 
