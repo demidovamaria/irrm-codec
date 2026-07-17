@@ -2,7 +2,9 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, IterableDataset, get_worker_info
 
-from irrm_codec.tokenization import BOS_ID, EOS_ID, PAD_ID, UNK_ID, VALID_AA, encode, gap_pad_cdr3
+from irrm_codec.tokenization import BOS_ID, EOS_ID, PAD_ID, UNK_ID, VALID_AA
+from irrm_codec.tokenization import encode as default_char_encode
+from irrm_codec.tokenization import gap_pad_cdr3
 
 
 def validate_dataframe(df, emb_array, max_len=40, clone_id_col="clone_id"):
@@ -175,18 +177,15 @@ class CachedBatchDataset(IterableDataset):
             del row_indices
             del standardized
 
-
 class ForwardDataset(Dataset):
-    def __init__(self, df, emb_array, max_len=40):
+    def __init__(self, df, emb_array, max_len=40, encode_fn=None):
         self.seqs = df["junction_aa"].tolist()
         self.embs = np.asarray(emb_array, dtype=np.float32)
         self.max_len = max_len
-
-    def __len__(self):
-        return len(self.seqs)
+        self.encode_fn = encode_fn or default_char_encode
 
     def __getitem__(self, idx):
-        tokens = encode(self.seqs[idx], self.max_len)
+        tokens = self.encode_fn(self.seqs[idx], self.max_len)
         return {
             "tokens": torch.tensor(tokens, dtype=torch.long),
             "embedding": torch.from_numpy(self.embs[idx]),
@@ -195,16 +194,14 @@ class ForwardDataset(Dataset):
 
 
 class InverseDataset(Dataset):
-    def __init__(self, df, emb_array, max_len=40):
+    def __init__(self, df, emb_array, max_len=40, encode_fn=None):
         self.seqs = df["junction_aa"].tolist()
         self.embs = np.asarray(emb_array, dtype=np.float32)
         self.max_len = max_len
-
-    def __len__(self):
-        return len(self.seqs)
+        self.encode_fn = encode_fn or default_char_encode
 
     def __getitem__(self, idx):
-        tokens = encode(self.seqs[idx], self.max_len)
+        tokens = self.encode_fn(self.seqs[idx], self.max_len)
         token_tensor = torch.tensor(tokens, dtype=torch.long)
         return {
             "embedding": torch.from_numpy(self.embs[idx]),
