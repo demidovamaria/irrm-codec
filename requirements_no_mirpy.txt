@@ -1,0 +1,14 @@
+--extra-index-url https://download.pytorch.org/whl/cu121
+numpy
+pandas
+pyarrow
+fastparquet
+matplotlib
+seaborn
+scikit-learn
+jupyterlab
+notebook
+ipykernel
+ipywidgets
+tqdm
+torch==2.4.1
