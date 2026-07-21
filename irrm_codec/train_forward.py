@@ -6,7 +6,10 @@ import numpy as np
 import torch
 from tqdm.auto import tqdm
 
-from irrm_codec.batch_cache import cleanup_batch_cache, prepare_cached_training_data, save_training_metadata
+# TODO: implement switching using flags
+# Switch back to using batch_cache.py once it is fixed
+# from irrm_codec.batch_cache import cleanup_batch_cache, prepare_cached_training_data, save_training_metadata
+from irrm_codec.batch_nocache import cleanup_batch_cache, prepare_cached_training_data, save_training_metadata
 from irrm_codec.datasets import collate_forward
 from irrm_codec.forward_model import ForwardModel
 from irrm_codec.losses import forward_loss, forward_metrics
