@@ -65,6 +65,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output-path", default="artifacts/tokenizers/tokenization_stats.json")
     parser.add_argument("--top-n", type=int, default=50)
+    parser.add_argument(
+        "--top-k-summary", type=int, default=10,
+        help="How many entries per top-token list to show in top_tokens_summary.txt (full top-n stays in the JSON).",
+    )
     parser.add_argument("--num-examples", type=int, default=20)
     parser.add_argument("--high-1-token-threshold", type=float, default=0.2)
     parser.add_argument("--high-unk-threshold", type=float, default=0.001)
@@ -464,6 +468,35 @@ def save_plain_summary(results: dict, path: Path) -> None:
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def build_top_tokens_summary_lines(results: dict, top_k: int) -> list[str]:
+    # compact, human-readable slice of the full top-n lists stored in the JSON -
+    # full top_n (default 50) stays in tokenization_stats.json only
+    lines = [f"=== Top tokens (train split, top {top_k} of each list) ==="]
+
+    for vocab_size, entry in sorted(results["per_vocab_size"].items(), key=lambda kv: int(kv[0])):
+        lines.append("")
+        lines.append(f"--- vocab_size={vocab_size} (actual={entry['vocab_size_actual']}) ---")
+
+        lines.append(f"top {top_k} by frequency:")
+        for item in entry["top_tokens_by_frequency_train"][:top_k]:
+            lines.append(f"  {item['token']!r:<12} count={item['count']}")
+
+        lines.append(f"top {top_k} longest tokens:")
+        for item in entry["top_longest_tokens"][:top_k]:
+            lines.append(f"  {item['token']!r:<12} aa_length={item['aa_length']} count={item['count']}")
+
+        lines.append(f"top {top_k} non-single-amino-acid tokens:")
+        for item in entry["top_non_single_amino_acid_tokens"][:top_k]:
+            lines.append(f"  {item['token']!r:<12} aa_length={item['aa_length']} count={item['count']}")
+
+    return lines
+
+
+def save_top_tokens_summary(results: dict, path: Path, top_k: int) -> None:
+    lines = build_top_tokens_summary_lines(results, top_k)
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
 def plot_train_memorization(vocab_sizes: list[int], per_vocab_size: dict, alarm_threshold: float, output_path: Path) -> None:
     train_frac_1_token = [per_vocab_size[str(vs)]["splits"]["train"]["fraction_encoded_as_1_token"] for vs in vocab_sizes]
 
@@ -739,6 +772,10 @@ def main() -> None:
     summary_path = output_path.parent / "tokenization_stats_summary.txt"
     save_plain_summary(results, summary_path)
     logger.info("wrote plain-text summary path=%s", summary_path)
+
+    top_tokens_summary_path = output_path.parent / "top_tokens_summary.txt"
+    save_top_tokens_summary(results, top_tokens_summary_path, args.top_k_summary)
+    logger.info("wrote top tokens summary path=%s", top_tokens_summary_path)
 
     if args.skip_plots:
         logger.info("--skip-plots set, not generating diagnostic plots")
