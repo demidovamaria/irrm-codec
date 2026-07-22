@@ -1,9 +1,14 @@
 """Compute WordPiece tokenization statistics on train/val/test splits.
 
-For each vocab_size tokenizer, computes required length/UNK/pad/compression
-statistics per split, top-token reports on the train split, a cross-vocab-size
-example table, and alarm checks (over-large vocab, misconfigured pre-tokenizer,
-insufficient compression benefit).
+For each vocab_size tokenizer, computes required length/UNK/compression
+statistics per split, a per-sequence token-count histogram, top-token reports
+on the train split, a cross-vocab-size example table, and alarm checks
+(over-large vocab, misconfigured pre-tokenizer, insufficient compression benefit).
+
+vocab_size grid: pass --training-summary-path (wordpiece_training_summary.json
+from train_wordpiece_tokenizers.py) to derive it automatically - this is the
+single source of truth and avoids drift with --vocab-sizes. If omitted,
+--vocab-sizes is used directly.
 
 Uses the same read_airr_table + split_indices(seed) call as
 prepare_wordpiece_corpus.py / batch_cache.py, so split membership here matches
@@ -12,6 +17,7 @@ what models are trained/evaluated on.
 import argparse
 import json
 import logging
+import math
 from collections import Counter
 from pathlib import Path
 
@@ -31,6 +37,7 @@ except ImportError:
 
 SPLIT_NAMES = ("train", "val", "test")
 MAIN_GRID_VOCAB_SIZES = (1000, 2000, 5000, 10000)
+SPLIT_COLORS = {"train": "tab:red", "val": "tab:blue", "test": "tab:orange"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -42,16 +49,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--val-fraction", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--tokenizers-dir", default="artifacts/tokenizers")
+    parser.add_argument(
+        "--training-summary-path", default="",
+        help=(
+            "Path to wordpiece_training_summary.json produced by train_wordpiece_tokenizers.py. "
+            "If set, vocab_size grid is read from this file's keys instead of --vocab-sizes, "
+            "eliminating drift between what was actually trained and what stats are computed on."
+        ),
+    )
     parser.add_argument("--vocab-sizes", type=int, nargs="+", default=[100, 1000, 2000, 5000, 10000])
     parser.add_argument("--example-vocab-sizes", type=int, nargs="+", default=list(MAIN_GRID_VOCAB_SIZES))
+    parser.add_argument(
+        "--allow-missing-tokenizers", action="store_true",
+        help="Downgrade a missing tokenizer.json from a hard error back to a skip+warning.",
+    )
     parser.add_argument("--output-path", default="artifacts/tokenizers/tokenization_stats.json")
     parser.add_argument("--top-n", type=int, default=50)
     parser.add_argument("--num-examples", type=int, default=20)
-    parser.add_argument("--max-len", type=int, default=40, help="Fixed length used for pad_token_fraction.")
     parser.add_argument("--high-1-token-threshold", type=float, default=0.2)
     parser.add_argument("--high-unk-threshold", type=float, default=0.001)
     parser.add_argument("--min-compression-benefit", type=float, default=0.2)
-    parser.add_argument("--skip-plots", action="store_true", help="Do not generate the two diagnostic PNG plots.")
+    parser.add_argument("--skip-plots", action="store_true", help="Do not generate the diagnostic PNG plots.")
     return parser.parse_args()
 
 
@@ -85,7 +103,7 @@ def load_split_sequences(
 
 
 def encode_raw(tokenizer: Tokenizer, seqs: list[str]) -> list:
-    # tokenizer object is reused across splits/calls, a prior call may have left padding on
+    # tokenizer object is reused across splits/calls, a prior call may have left this enabled
     tokenizer.no_padding()
     tokenizer.no_truncation()
     return tokenizer.encode_batch(seqs)
@@ -143,32 +161,16 @@ def summarize_token_counts(token_counts: list[int]) -> dict:
     }
 
 
-def count_pad_tokens(tokenizer: Tokenizer, seqs: list[str], pad_id: int, max_len: int) -> tuple[int, int]:
-    # length=max_len mirrors what collate_forward/collate_inverse actually feed the model
-    tokenizer.enable_padding(pad_id=pad_id, pad_token="[PAD]", length=max_len)
-    tokenizer.enable_truncation(max_length=max_len)
-    padded_encodings = tokenizer.encode_batch(seqs)
-
-    total_positions = 0
-    total_pad_positions = 0
-    for encoding in padded_encodings:
-        for token_id in encoding.ids:
-            total_positions += 1
-            if token_id == pad_id:
-                total_pad_positions += 1
-
-    # reset so later calls on this tokenizer (other splits, top tokens, examples) get raw output
-    tokenizer.no_padding()
-    tokenizer.no_truncation()
-    return total_positions, total_pad_positions
+def compute_token_count_histogram(token_counts: list[int]) -> dict[str, int]:
+    # JSON object keys must be strings; num_tokens is bounded so this stays small
+    histogram = Counter(token_counts)
+    return {str(num_tokens): count for num_tokens, count in sorted(histogram.items())}
 
 
 def compute_split_stats(
     tokenizer: Tokenizer,
     seqs: list[str],
     unk_id: int,
-    pad_id: int,
-    max_len: int,
     mean_char_length: float,
 ) -> tuple[dict, list]:
     num_sequences = len(seqs)
@@ -177,7 +179,6 @@ def compute_split_stats(
     token_counts = count_tokens_per_sequence(encodings)
     total_tokens, total_unk_tokens, sequences_with_unk = count_unk_tokens(encodings, unk_id)
     count_1, count_2, count_3 = count_short_sequences(token_counts)
-    total_positions, total_pad_positions = count_pad_tokens(tokenizer, seqs, pad_id, max_len)
 
     mean_num_tokens = float(np.mean(token_counts))
     compression_ratio = mean_num_tokens / mean_char_length if mean_char_length > 0 else float("nan")
@@ -185,9 +186,9 @@ def compute_split_stats(
     stats = {
         "number_of_sequences": num_sequences,
         **summarize_token_counts(token_counts),
+        "token_count_histogram": compute_token_count_histogram(token_counts),
         "unk_token_fraction": total_unk_tokens / total_tokens if total_tokens > 0 else 0.0,
         "unk_sequence_fraction": sequences_with_unk / num_sequences,
-        "pad_token_fraction": total_pad_positions / total_positions if total_positions > 0 else 0.0,
         "fraction_encoded_as_1_token": count_1 / num_sequences,
         "fraction_encoded_as_2_tokens_or_less": count_2 / num_sequences,
         "fraction_encoded_as_3_tokens_or_less": count_3 / num_sequences,
@@ -289,7 +290,7 @@ def build_examples_table(tokenizers_by_vocab_size: dict, example_seqs: list[str]
     for seq in example_seqs:
         row = {"original_cdr3": seq}
         for vocab_size, tokenizer in tokenizers_by_vocab_size.items():
-            # reset in case this tokenizer object still has padding enabled from compute_split_stats
+            # reset in case this tokenizer object still has other state from compute_split_stats
             tokenizer.no_padding()
             tokenizer.no_truncation()
             encoding = tokenizer.encode(seq)
@@ -306,7 +307,8 @@ RESET = "\033[0m"
 
 GENERALIZATION_GAP_THRESHOLD = 0.05
 
-ROW_FORMAT = "{:<12}{:<7}{:>9}{:>9}{:>10}{:>10}{:>10}{:>10}"
+ROW_FORMAT = "{:<12}{:<7}{:>9}{:>9}{:>10}{:>10}{:>10}"
+TOKEN_COUNT_ROW_FORMAT = "{:<12}{:<7}{:>8}{:>8}{:>6}{:>6}{:>8}"
 
 
 def colorize(text: str, color: str) -> str:
@@ -347,16 +349,38 @@ def format_row(vocab_size: str, split_name: str, stats: dict) -> str:
         f"{stats['mean_num_tokens']:.2f}",
         f"{stats['compression_ratio']:.3f}",
         f"{stats['unk_token_fraction']:.4f}",
-        f"{stats['pad_token_fraction']:.3f}",
         f"{stats['fraction_encoded_as_1_token']:.4f}",
         f"{stats['fraction_encoded_as_3_tokens_or_less']:.3f}",
     )
 
 
+def build_token_count_description_lines(results: dict) -> list[str]:
+    # answers directly: how many tokens does one sequence get on average / at minimum / at maximum
+    lines = ["=== Token count per sequence: mean / median / min / max / p95 ==="]
+    header = TOKEN_COUNT_ROW_FORMAT.format("vocab_size", "split", "mean", "median", "min", "max", "p95")
+    lines.append(header)
+    lines.append("-" * len(header))
+    for vocab_size, entry in sorted(results["per_vocab_size"].items(), key=lambda kv: int(kv[0])):
+        for split_name in SPLIT_NAMES:
+            stats = entry["splits"][split_name]
+            lines.append(
+                TOKEN_COUNT_ROW_FORMAT.format(
+                    vocab_size, split_name,
+                    f"{stats['mean_num_tokens']:.2f}",
+                    f"{stats['median_num_tokens']:.1f}",
+                    stats["min_num_tokens"],
+                    stats["max_num_tokens"],
+                    f"{stats['p95_num_tokens']:.1f}",
+                )
+            )
+        lines.append("")
+    return lines
+
+
 def print_colored_summary(results: dict) -> None:
     groups = build_summary_rows(results)
     header = ROW_FORMAT.format(
-        "vocab_size", "split", "mean_tok", "compr", "unk_frac", "pad_frac", "frac=1tok", "frac<=3tok",
+        "vocab_size", "split", "mean_tok", "compr", "unk_frac", "frac=1tok", "frac<=3tok",
     )
 
     print()
@@ -394,13 +418,17 @@ def print_colored_summary(results: dict) -> None:
         )
     )
 
+    print()
+    for line in build_token_count_description_lines(results):
+        print(line)
+
 
 def save_plain_summary(results: dict, path: Path) -> None:
     # same content as print_colored_summary, no ANSI codes - readable in any text viewer.
     # flagged rows get a bracket marker instead of color, since plain text has no color.
     groups = build_summary_rows(results)
     header = ROW_FORMAT.format(
-        "vocab_size", "split", "mean_tok", "compr", "unk_frac", "pad_frac", "frac=1tok", "frac<=3tok",
+        "vocab_size", "split", "mean_tok", "compr", "unk_frac", "frac=1tok", "frac<=3tok",
     )
 
     lines = ["=== Tokenization statistics summary ===", header, "-" * len(header)]
@@ -430,6 +458,8 @@ def save_plain_summary(results: dict, path: Path) -> None:
         f"[GAP] rows: |train_frac_1_token - split_frac_1_token| > {GENERALIZATION_GAP_THRESHOLD:.0%} "
         "(possible tokenizer memorization of train sequences)."
     )
+    lines.append("")
+    lines.extend(build_token_count_description_lines(results))
 
     path.write_text("\n".join(lines), encoding="utf-8")
 
@@ -467,7 +497,106 @@ def plot_val_test_compression(vocab_sizes: list[int], per_vocab_size: dict, outp
     plt.close(fig)
 
 
-def save_diagnostic_plots(results: dict, output_dir: Path, alarm_threshold: float, logger: logging.Logger) -> None:
+def plot_metric_vs_vocab_size(
+    vocab_sizes: list[int],
+    per_vocab_size: dict,
+    metric_key: str,
+    ylabel: str,
+    title: str,
+    output_path: Path,
+    hline: float | None = None,
+    hline_label: str = "",
+) -> None:
+    fig, ax = plt.subplots(figsize=(8, 5))
+    for split_name in SPLIT_NAMES:
+        values = [per_vocab_size[str(vs)]["splits"][split_name][metric_key] for vs in vocab_sizes]
+        ax.plot(vocab_sizes, values, marker="o", label=split_name, color=SPLIT_COLORS[split_name])
+    if hline is not None:
+        ax.axhline(hline, color="gray", linestyle="--", label=hline_label)
+    ax.set_xlabel("vocab_size")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.legend()
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+
+
+def plot_fraction_short_sequences(vocab_sizes: list[int], per_vocab_size: dict, output_path: Path) -> None:
+    # train-only: this is what compute_alarms actually checks (fraction_1_token on train);
+    # showing all 3 thresholds together shows how fast short-sequence mass grows with vocab_size
+    metric_keys = (
+        "fraction_encoded_as_1_token",
+        "fraction_encoded_as_2_tokens_or_less",
+        "fraction_encoded_as_3_tokens_or_less",
+    )
+    labels = ("<=1 token", "<=2 tokens", "<=3 tokens")
+    colors = ("tab:red", "tab:orange", "tab:green")
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    for metric_key, label, color in zip(metric_keys, labels, colors):
+        values = [per_vocab_size[str(vs)]["splits"]["train"][metric_key] for vs in vocab_sizes]
+        ax.plot(vocab_sizes, values, marker="o", label=label, color=color)
+    ax.set_xlabel("vocab_size")
+    ax.set_ylabel("fraction of train sequences")
+    ax.set_title("Short-sequence mass vs vocab_size (train)")
+    ax.legend()
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+
+
+def plot_vocab_size_actual_vs_requested(vocab_sizes: list[int], per_vocab_size: dict, output_path: Path) -> None:
+    requested = vocab_sizes
+    actual = [per_vocab_size[str(vs)]["vocab_size_actual"] for vs in vocab_sizes]
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.plot(requested, requested, linestyle="--", color="gray", label="y = x (no floor effect)")
+    ax.plot(requested, actual, marker="o", color="tab:purple", label="actual_vocab_size")
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel("vocab_size_requested")
+    ax.set_ylabel("vocab_size_actual")
+    ax.set_title("WordPiece floor effect: requested vs actual vocab size")
+    ax.legend()
+    ax.grid(alpha=0.3, which="both")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+
+
+def plot_token_count_histogram_grid(
+    vocab_sizes: list[int], per_vocab_size: dict, split_name: str, output_path: Path
+) -> None:
+    ncols = 3
+    nrows = math.ceil(len(vocab_sizes) / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 4, nrows * 3), squeeze=False)
+
+    for idx, vocab_size in enumerate(vocab_sizes):
+        ax = axes[idx // ncols][idx % ncols]
+        histogram = per_vocab_size[str(vocab_size)]["splits"][split_name]["token_count_histogram"]
+        num_tokens_values = sorted(int(k) for k in histogram.keys())
+        counts = [histogram[str(k)] for k in num_tokens_values]
+        total = sum(counts)
+        fractions = [count / total for count in counts]
+
+        ax.bar(num_tokens_values, fractions, color="tab:green")
+        ax.set_title(f"vocab_size={vocab_size}", fontsize=10)
+        ax.set_xlabel("num_tokens")
+        ax.set_ylabel("fraction")
+
+    for idx in range(len(vocab_sizes), nrows * ncols):
+        axes[idx // ncols][idx % ncols].axis("off")
+
+    fig.suptitle(f"Token count distribution per sequence ({split_name} split)")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+
+
+def save_diagnostic_plots(results: dict, output_dir: Path, args: argparse.Namespace, logger: logging.Logger) -> None:
     # needs at least 2 vocab_size points to draw a meaningful line
     vocab_sizes = sorted(int(vs) for vs in results["per_vocab_size"].keys())
     if len(vocab_sizes) < 2:
@@ -476,13 +605,34 @@ def save_diagnostic_plots(results: dict, output_dir: Path, alarm_threshold: floa
 
     per_vocab_size = results["per_vocab_size"]
 
-    train_plot_path = output_dir / "train_memorization_vs_vocab_size.png"
-    plot_train_memorization(vocab_sizes, per_vocab_size, alarm_threshold, train_plot_path)
-    logger.info("saved plot path=%s", train_plot_path)
+    plots = [
+        ("train_memorization_vs_vocab_size.png",
+         lambda path: plot_train_memorization(vocab_sizes, per_vocab_size, args.high_1_token_threshold, path)),
+        ("val_test_compression_vs_vocab_size.png",
+         lambda path: plot_val_test_compression(vocab_sizes, per_vocab_size, path)),
+        ("unk_token_fraction_vs_vocab_size.png",
+         lambda path: plot_metric_vs_vocab_size(
+             vocab_sizes, per_vocab_size, "unk_token_fraction", "unk_token_fraction",
+             "UNK token fraction vs vocab_size", path,
+             hline=args.high_unk_threshold, hline_label=f"alarm threshold ({args.high_unk_threshold:.2%})",
+         )),
+        ("compression_ratio_vs_vocab_size.png",
+         lambda path: plot_metric_vs_vocab_size(
+             vocab_sizes, per_vocab_size, "compression_ratio", "compression_ratio (tokens / amino acid)",
+             "Compression ratio vs vocab_size", path,
+         )),
+        ("fraction_short_sequences_vs_vocab_size.png",
+         lambda path: plot_fraction_short_sequences(vocab_sizes, per_vocab_size, path)),
+        ("vocab_size_actual_vs_requested.png",
+         lambda path: plot_vocab_size_actual_vs_requested(vocab_sizes, per_vocab_size, path)),
+        ("token_count_histogram_train.png",
+         lambda path: plot_token_count_histogram_grid(vocab_sizes, per_vocab_size, "train", path)),
+    ]
 
-    valtest_plot_path = output_dir / "val_test_compression_vs_vocab_size.png"
-    plot_val_test_compression(vocab_sizes, per_vocab_size, valtest_plot_path)
-    logger.info("saved plot path=%s", valtest_plot_path)
+    for filename, plot_fn in plots:
+        plot_path = output_dir / filename
+        plot_fn(plot_path)
+        logger.info("saved plot path=%s", plot_path)
 
 
 def main() -> None:
@@ -499,20 +649,45 @@ def main() -> None:
     }
 
     tokenizers_dir = Path(args.tokenizers_dir)
-    results = {"per_vocab_size": {}, "examples": [], "max_len_used_for_padding_stats": args.max_len}
+
+    if args.training_summary_path:
+        # single source of truth: whatever train_wordpiece_tokenizers.py actually trained,
+        # not a hand-maintained CLI list that can silently drift from it
+        summary_path = Path(args.training_summary_path)
+        training_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        vocab_sizes_to_process = sorted(int(vs) for vs in training_summary.keys())
+        logger.info(
+            "vocab_size grid loaded from training summary path=%s sizes=%s",
+            summary_path, vocab_sizes_to_process,
+        )
+    else:
+        vocab_sizes_to_process = args.vocab_sizes
+
+    results = {
+        "per_vocab_size": {},
+        "examples": [],
+        "vocab_sizes_requested": list(vocab_sizes_to_process),
+        "vocab_sizes_skipped_missing_tokenizer": [],
+    }
     example_tokenizers = {}
 
-    for vocab_size in args.vocab_sizes:
+    for vocab_size in vocab_sizes_to_process:
         tokenizer_path = tokenizers_dir / f"wordpiece_vocab_{vocab_size}" / "tokenizer.json"
         if not tokenizer_path.exists():
+            if not args.allow_missing_tokenizers:
+                raise FileNotFoundError(
+                    f"Tokenizer file not found: {tokenizer_path}. This vocab_size was requested "
+                    f"(either via --vocab-sizes or {args.training_summary_path!r}) but no matching "
+                    "tokenizer was trained. Pass --allow-missing-tokenizers to skip instead of failing."
+                )
             logger.warning("tokenizer file not found, skipping: %s", tokenizer_path)
+            results["vocab_sizes_skipped_missing_tokenizer"].append(vocab_size)
             continue
 
         logger.info("computing stats for vocab_size=%d", vocab_size)
         tokenizer = Tokenizer.from_file(str(tokenizer_path))
         vocab = tokenizer.get_vocab()
         unk_id = vocab["[UNK]"]
-        pad_id = vocab["[PAD]"]
         actual_vocab_size = tokenizer.get_vocab_size()
 
         split_results = {}
@@ -520,16 +695,15 @@ def main() -> None:
         for split_name in SPLIT_NAMES:
             seqs = split_seqs[split_name]
             stats, encodings = compute_split_stats(
-                tokenizer, seqs, unk_id, pad_id, args.max_len, mean_char_length_by_split[split_name],
+                tokenizer, seqs, unk_id, mean_char_length_by_split[split_name],
             )
             split_results[split_name] = stats
             if split_name == "train":
                 train_encodings = encodings
             logger.info(
-                "vocab_size=%d split=%s mean_num_tokens=%.2f unk_token_fraction=%.6f "
-                "pad_token_fraction=%.4f fraction_1_token=%.4f",
+                "vocab_size=%d split=%s mean_num_tokens=%.2f unk_token_fraction=%.6f fraction_1_token=%.4f",
                 vocab_size, split_name, stats["mean_num_tokens"], stats["unk_token_fraction"],
-                stats["pad_token_fraction"], stats["fraction_encoded_as_1_token"],
+                stats["fraction_encoded_as_1_token"],
             )
 
         top_token_reports = compute_top_token_reports(tokenizer, train_encodings, args.top_n)
@@ -571,7 +745,7 @@ def main() -> None:
     elif not MATPLOTLIB_AVAILABLE:
         logger.warning("matplotlib not installed, skipping diagnostic plots (pip install matplotlib)")
     else:
-        save_diagnostic_plots(results, output_path.parent, args.high_1_token_threshold, logger)
+        save_diagnostic_plots(results, output_path.parent, args, logger)
 
     print_colored_summary(results)
 
