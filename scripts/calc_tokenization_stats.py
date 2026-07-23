@@ -227,7 +227,7 @@ def aa_length(token: str) -> int:
 
 def compute_token_position_stats(
     train_seqs: list[str], train_encodings: list, target_ids: set[int]
-) -> dict[int, dict]:
+) -> tuple[dict[int, dict], dict[int, list]]:
     bucket_counts = {token_id: Counter() for token_id in target_ids}
     relative_positions_by_token = {token_id: [] for token_id in target_ids}
 
@@ -252,7 +252,18 @@ def compute_token_position_stats(
         for region in POSITION_REGION_NAMES:
             stats[f"fraction_{region}"] = buckets.get(region, 0) / total if total > 0 else 0.0
         stats_by_token[token_id] = stats
-    return stats_by_token
+    return stats_by_token, relative_positions_by_token
+
+
+def compute_relative_position_histogram(relative_positions_by_token: dict[int, list], num_bins: int = 20) -> dict[str, int]:
+    # flattens ALL top-N token occurrences into one distribution: "where, across the whole
+    # relative-position axis, do frequent-token occurrences concentrate" - not just 3 buckets
+    all_positions = [pos for positions in relative_positions_by_token.values() for pos in positions]
+    if not all_positions:
+        return {}
+    counts, _ = np.histogram(all_positions, bins=num_bins, range=(0.0, 1.0))
+    bin_width = 1.0 / num_bins
+    return {f"{(i + 0.5) * bin_width:.3f}": int(counts[i]) for i in range(num_bins)}
 
 
 def compute_position_macro_composition(top_by_frequency: list[dict]) -> dict:
@@ -285,7 +296,7 @@ def compute_top_token_reports(
         )
 
     top_by_frequency_ids = [tid for tid, _ in token_counter.most_common(top_n)]
-    position_stats_by_token = compute_token_position_stats(
+    position_stats_by_token, relative_positions_by_token = compute_token_position_stats(
         train_seqs, train_encodings, set(top_by_frequency_ids)
     )
     top_by_frequency = [
@@ -315,6 +326,9 @@ def compute_top_token_reports(
             str(aa_len): count for aa_len, count in sorted(aa_length_histogram.items())
         },
         "top_tokens_position_macro_composition_train": compute_position_macro_composition(top_by_frequency),
+        "top_tokens_relative_position_histogram_train": compute_relative_position_histogram(
+            relative_positions_by_token
+        ),
     }
 
 
@@ -556,11 +570,21 @@ def build_top_tokens_summary_lines(results: dict, top_k: int) -> list[str]:
         lines.append("")
         lines.append(f"--- vocab_size={vocab_size} (actual={entry['vocab_size_actual']}) ---")
 
-        lines.append(f"top {top_k} by frequency (mean relative position, 0=start / 1=end):")
+        macro = entry["top_tokens_position_macro_composition_train"]
+        lines.append(
+            f"position composition of top-{entry['top_tokens_by_frequency_train'].__len__()} "
+            f"frequent tokens (train, count-weighted): "
+            f"start_third={macro['start_third']:.1%} "
+            f"middle_third={macro['middle_third']:.1%} "
+            f"end_third={macro['end_third']:.1%}"
+        )
+
+        lines.append(f"top {top_k} by frequency (relative position: mean / start-mid-end thirds):")
         for item in entry["top_tokens_by_frequency_train"][:top_k]:
             lines.append(
                 f"  {item['token']!r:<12} count={item['count']:<10} "
-                f"mean_rel_pos={item['mean_relative_position']:.3f}"
+                f"mean_rel_pos={item['mean_relative_position']:.3f}  "
+                f"[{item['fraction_start_third']:.0%}/{item['fraction_middle_third']:.0%}/{item['fraction_end_third']:.0%}]"
             )
 
         lines.append(f"top {top_k} longest tokens:")
@@ -777,6 +801,40 @@ def plot_top_tokens_position_grid(vocab_sizes: list[int], per_vocab_size: dict, 
     plt.close(fig)
 
 
+def plot_top_tokens_relative_position_histogram_grid(
+    vocab_sizes: list[int], per_vocab_size: dict, output_path: Path
+) -> None:
+    # true density view: distribution of ALL top-N frequent-token occurrences along the
+    # relative-position axis - complements the thirds-based composition/errorbar plots above
+    ncols = 3
+    nrows = math.ceil(len(vocab_sizes) / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 4, nrows * 3), squeeze=False)
+
+    for idx, vocab_size in enumerate(vocab_sizes):
+        ax = axes[idx // ncols][idx % ncols]
+        histogram = per_vocab_size[str(vocab_size)]["top_tokens_relative_position_histogram_train"]
+        bin_centers = sorted(float(k) for k in histogram.keys())
+        counts = [histogram[f"{c:.3f}"] for c in bin_centers]
+        total = sum(counts)
+        fractions = [count / total for count in counts] if total > 0 else counts
+        bin_width = bin_centers[1] - bin_centers[0] if len(bin_centers) > 1 else 0.05
+
+        ax.bar(bin_centers, fractions, width=bin_width * 0.9, color="tab:purple")
+        ax.axvline(0.5, color="gray", linestyle="--", linewidth=1)
+        ax.set_xlim(0, 1)
+        ax.set_title(f"vocab_size={vocab_size}", fontsize=10)
+        ax.set_xlabel("relative position (0=start, 1=end)")
+        ax.set_ylabel("fraction")
+
+    for idx in range(len(vocab_sizes), nrows * ncols):
+        axes[idx // ncols][idx % ncols].axis("off")
+
+    fig.suptitle("Distribution of top-N frequent-token occurrences by relative position (train)")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+
+
 def save_diagnostic_plots(results: dict, output_dir: Path, args: argparse.Namespace, logger: logging.Logger) -> None:
     # needs at least 2 vocab_size points to draw a meaningful line
     vocab_sizes = sorted(int(vs) for vs in results["per_vocab_size"].keys())
@@ -812,6 +870,8 @@ def save_diagnostic_plots(results: dict, output_dir: Path, args: argparse.Namesp
          lambda path: plot_top_tokens_position_composition(vocab_sizes, per_vocab_size, path)),
         ("top_tokens_position_grid.png",
          lambda path: plot_top_tokens_position_grid(vocab_sizes, per_vocab_size, path)),
+        ("top_tokens_relative_position_histogram.png",
+         lambda path: plot_top_tokens_relative_position_histogram_grid(vocab_sizes, per_vocab_size, path)),
     ]
 
     for filename, plot_fn in plots:
