@@ -38,6 +38,22 @@ except ImportError:
 SPLIT_NAMES = ("train", "val", "test")
 MAIN_GRID_VOCAB_SIZES = (1000, 2000, 5000, 10000)
 SPLIT_COLORS = {"train": "tab:red", "val": "tab:blue", "test": "tab:orange"}
+POSITION_REGION_NAMES = ("start_third", "middle_third", "end_third")
+
+
+def relative_position(start: int, end: int, seq_len: int) -> float:
+    # midpoint of the token's character span, normalized by THIS sequence's own length -
+    # comparable across CDR3s of different lengths, not tied to a fixed anchor char-count
+    midpoint = (start + end) / 2.0
+    return midpoint / seq_len if seq_len > 0 else 0.0
+
+
+def classify_relative_position(rel_pos: float) -> str:
+    if rel_pos < 1 / 3:
+        return "start_third"
+    if rel_pos < 2 / 3:
+        return "middle_third"
+    return "end_third"
 
 
 def parse_args() -> argparse.Namespace:
@@ -209,7 +225,53 @@ def aa_length(token: str) -> int:
     return len(token)
 
 
-def compute_top_token_reports(tokenizer: Tokenizer, train_encodings: list, top_n: int) -> dict:
+def compute_token_position_stats(
+    train_seqs: list[str], train_encodings: list, target_ids: set[int]
+) -> dict[int, dict]:
+    bucket_counts = {token_id: Counter() for token_id in target_ids}
+    relative_positions_by_token = {token_id: [] for token_id in target_ids}
+
+    for seq, encoding in zip(train_seqs, train_encodings):
+        seq_len = len(seq)
+        for token_id, (start, end) in zip(encoding.ids, encoding.offsets):
+            if token_id in target_ids:
+                rel_pos = relative_position(start, end, seq_len)
+                bucket_counts[token_id][classify_relative_position(rel_pos)] += 1
+                relative_positions_by_token[token_id].append(rel_pos)
+
+    stats_by_token = {}
+    for token_id in target_ids:
+        buckets = bucket_counts[token_id]
+        total = sum(buckets.values())
+        rel_positions = np.array(relative_positions_by_token[token_id])
+        stats = {
+            "mean_relative_position": float(rel_positions.mean()) if total > 0 else float("nan"),
+            "median_relative_position": float(np.median(rel_positions)) if total > 0 else float("nan"),
+            "std_relative_position": float(rel_positions.std()) if total > 0 else float("nan"),
+        }
+        for region in POSITION_REGION_NAMES:
+            stats[f"fraction_{region}"] = buckets.get(region, 0) / total if total > 0 else 0.0
+        stats_by_token[token_id] = stats
+    return stats_by_token
+
+
+def compute_position_macro_composition(top_by_frequency: list[dict]) -> dict:
+    # count-weighted average across the top-N tokens: "of all top-N frequent-token
+    # OCCURRENCES in train, what fraction sits in each relative third" (not a per-token average)
+    totals = {region: 0.0 for region in POSITION_REGION_NAMES}
+    grand_total = 0
+    for item in top_by_frequency:
+        for region in POSITION_REGION_NAMES:
+            totals[region] += item[f"fraction_{region}"] * item["count"]
+        grand_total += item["count"]
+    if grand_total == 0:
+        return {region: 0.0 for region in POSITION_REGION_NAMES}
+    return {region: totals[region] / grand_total for region in POSITION_REGION_NAMES}
+
+
+def compute_top_token_reports(
+    tokenizer: Tokenizer, train_encodings: list, train_seqs: list[str], top_n: int
+) -> dict:
     token_counter: Counter = Counter()
     for encoding in train_encodings:
         for token_id in encoding.ids:
@@ -222,9 +284,16 @@ def compute_top_token_reports(tokenizer: Tokenizer, train_encodings: list, top_n
             {"token": token_text, "id": token_id, "count": count, "aa_length": aa_length(token_text)}
         )
 
+    top_by_frequency_ids = [tid for tid, _ in token_counter.most_common(top_n)]
+    position_stats_by_token = compute_token_position_stats(
+        train_seqs, train_encodings, set(top_by_frequency_ids)
+    )
     top_by_frequency = [
-        {"token": tokenizer.id_to_token(tid), "id": tid, "count": count}
-        for tid, count in token_counter.most_common(top_n)
+        {
+            "token": tokenizer.id_to_token(tid), "id": tid, "count": token_counter[tid],
+            **position_stats_by_token[tid],
+        }
+        for tid in top_by_frequency_ids
     ]
 
     top_longest = sorted(all_seen_tokens, key=lambda item: (-item["aa_length"], -item["count"]))[:top_n]
@@ -232,10 +301,20 @@ def compute_top_token_reports(tokenizer: Tokenizer, train_encodings: list, top_n
     non_single_aa_tokens = [item for item in all_seen_tokens if item["aa_length"] > 1]
     top_non_single_aa = sorted(non_single_aa_tokens, key=lambda item: -item["count"])[:top_n]
 
+    # frequency-weighted: what fraction of the tokenized train corpus is made up of
+    # tokens of each aa_length, not just how many distinct vocab entries have that length
+    aa_length_histogram: Counter = Counter()
+    for item in all_seen_tokens:
+        aa_length_histogram[item["aa_length"]] += item["count"]
+
     return {
         "top_tokens_by_frequency_train": top_by_frequency,
         "top_longest_tokens": top_longest,
         "top_non_single_amino_acid_tokens": top_non_single_aa,
+        "token_aa_length_histogram_train": {
+            str(aa_len): count for aa_len, count in sorted(aa_length_histogram.items())
+        },
+        "top_tokens_position_macro_composition_train": compute_position_macro_composition(top_by_frequency),
     }
 
 
@@ -477,9 +556,12 @@ def build_top_tokens_summary_lines(results: dict, top_k: int) -> list[str]:
         lines.append("")
         lines.append(f"--- vocab_size={vocab_size} (actual={entry['vocab_size_actual']}) ---")
 
-        lines.append(f"top {top_k} by frequency:")
+        lines.append(f"top {top_k} by frequency (mean relative position, 0=start / 1=end):")
         for item in entry["top_tokens_by_frequency_train"][:top_k]:
-            lines.append(f"  {item['token']!r:<12} count={item['count']}")
+            lines.append(
+                f"  {item['token']!r:<12} count={item['count']:<10} "
+                f"mean_rel_pos={item['mean_relative_position']:.3f}"
+            )
 
         lines.append(f"top {top_k} longest tokens:")
         for item in entry["top_longest_tokens"][:top_k]:
@@ -581,20 +663,32 @@ def plot_fraction_short_sequences(vocab_sizes: list[int], per_vocab_size: dict, 
     plt.close(fig)
 
 
-def plot_vocab_size_actual_vs_requested(vocab_sizes: list[int], per_vocab_size: dict, output_path: Path) -> None:
-    requested = vocab_sizes
-    actual = [per_vocab_size[str(vs)]["vocab_size_actual"] for vs in vocab_sizes]
+def plot_token_aa_length_histogram_grid(
+    vocab_sizes: list[int], per_vocab_size: dict, output_path: Path
+) -> None:
+    # token length (amino acids per subword piece), frequency-weighted by train usage -
+    # distinct from plot_token_count_histogram_grid, which is sequence-level (tokens per CDR3)
+    ncols = 3
+    nrows = math.ceil(len(vocab_sizes) / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 4, nrows * 3), squeeze=False)
 
-    fig, ax = plt.subplots(figsize=(8, 5))
-    ax.plot(requested, requested, linestyle="--", color="gray", label="y = x (no floor effect)")
-    ax.plot(requested, actual, marker="o", color="tab:purple", label="actual_vocab_size")
-    ax.set_xscale("log")
-    ax.set_yscale("log")
-    ax.set_xlabel("vocab_size_requested")
-    ax.set_ylabel("vocab_size_actual")
-    ax.set_title("WordPiece floor effect: requested vs actual vocab size")
-    ax.legend()
-    ax.grid(alpha=0.3, which="both")
+    for idx, vocab_size in enumerate(vocab_sizes):
+        ax = axes[idx // ncols][idx % ncols]
+        histogram = per_vocab_size[str(vocab_size)]["token_aa_length_histogram_train"]
+        aa_lengths = sorted(int(k) for k in histogram.keys())
+        counts = [histogram[str(k)] for k in aa_lengths]
+        total = sum(counts)
+        fractions = [count / total for count in counts]
+
+        ax.bar(aa_lengths, fractions, color="tab:blue")
+        ax.set_title(f"vocab_size={vocab_size}", fontsize=10)
+        ax.set_xlabel("token aa_length")
+        ax.set_ylabel("fraction of tokens")
+
+    for idx in range(len(vocab_sizes), nrows * ncols):
+        axes[idx // ncols][idx % ncols].axis("off")
+
+    fig.suptitle("Token length distribution, frequency-weighted (train usage)")
     fig.tight_layout()
     fig.savefig(output_path, dpi=150)
     plt.close(fig)
@@ -629,6 +723,60 @@ def plot_token_count_histogram_grid(
     plt.close(fig)
 
 
+def plot_top_tokens_position_composition(vocab_sizes: list[int], per_vocab_size: dict, output_path: Path) -> None:
+    fig, ax = plt.subplots(figsize=(9, 5))
+    bottoms = [0.0] * len(vocab_sizes)
+    colors = {"start_third": "tab:blue", "middle_third": "tab:gray", "end_third": "tab:orange"}
+    for region in POSITION_REGION_NAMES:
+        values = [
+            per_vocab_size[str(vs)]["top_tokens_position_macro_composition_train"][region] for vs in vocab_sizes
+        ]
+        ax.bar([str(vs) for vs in vocab_sizes], values, bottom=bottoms, label=region, color=colors[region])
+        bottoms = [b + v for b, v in zip(bottoms, values)]
+    ax.axhline(1 / 3, color="black", linestyle=":", linewidth=1, label="uniform baseline (1/3)")
+    ax.axhline(2 / 3, color="black", linestyle=":", linewidth=1)
+    ax.set_xlabel("vocab_size")
+    ax.set_ylabel("fraction of top-N frequent-token occurrences")
+    ax.set_title("Where do the top-N most frequent tokens sit, relative to sequence length? (train)")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+
+
+def plot_top_tokens_position_grid(vocab_sizes: list[int], per_vocab_size: dict, output_path: Path) -> None:
+    ncols = 3
+    nrows = math.ceil(len(vocab_sizes) / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 5, nrows * 4), squeeze=False)
+
+    for idx, vocab_size in enumerate(vocab_sizes):
+        ax = axes[idx // ncols][idx % ncols]
+        top_by_frequency = per_vocab_size[str(vocab_size)]["top_tokens_by_frequency_train"]
+        sorted_rows = sorted(top_by_frequency, key=lambda r: r["mean_relative_position"])
+        y_positions = range(len(sorted_rows))
+        means = [r["mean_relative_position"] for r in sorted_rows]
+        stds = [r["std_relative_position"] for r in sorted_rows]
+        labels = [r["token"] for r in sorted_rows]
+
+        ax.errorbar(
+            means, y_positions, xerr=stds, fmt="o", color="tab:purple", ecolor="lightgray",
+            capsize=2, markersize=3,
+        )
+        ax.axvline(0.5, color="gray", linestyle="--", linewidth=1)
+        ax.set_yticks(list(y_positions))
+        ax.set_yticklabels(labels, fontsize=6)
+        ax.set_xlabel("relative position")
+        ax.set_title(f"vocab_size={vocab_size}", fontsize=10)
+
+    for idx in range(len(vocab_sizes), nrows * ncols):
+        axes[idx // ncols][idx % ncols].axis("off")
+
+    fig.suptitle("Top-N frequent token relative positions (mean +/- std, train)")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+
+
 def save_diagnostic_plots(results: dict, output_dir: Path, args: argparse.Namespace, logger: logging.Logger) -> None:
     # needs at least 2 vocab_size points to draw a meaningful line
     vocab_sizes = sorted(int(vs) for vs in results["per_vocab_size"].keys())
@@ -656,10 +804,14 @@ def save_diagnostic_plots(results: dict, output_dir: Path, args: argparse.Namesp
          )),
         ("fraction_short_sequences_vs_vocab_size.png",
          lambda path: plot_fraction_short_sequences(vocab_sizes, per_vocab_size, path)),
-        ("vocab_size_actual_vs_requested.png",
-         lambda path: plot_vocab_size_actual_vs_requested(vocab_sizes, per_vocab_size, path)),
         ("token_count_histogram_train.png",
          lambda path: plot_token_count_histogram_grid(vocab_sizes, per_vocab_size, "train", path)),
+        ("token_aa_length_histogram_train.png",
+         lambda path: plot_token_aa_length_histogram_grid(vocab_sizes, per_vocab_size, path)),
+        ("top_tokens_position_composition_vs_vocab_size.png",
+         lambda path: plot_top_tokens_position_composition(vocab_sizes, per_vocab_size, path)),
+        ("top_tokens_position_grid.png",
+         lambda path: plot_top_tokens_position_grid(vocab_sizes, per_vocab_size, path)),
     ]
 
     for filename, plot_fn in plots:
@@ -739,7 +891,7 @@ def main() -> None:
                 stats["fraction_encoded_as_1_token"],
             )
 
-        top_token_reports = compute_top_token_reports(tokenizer, train_encodings, args.top_n)
+        top_token_reports = compute_top_token_reports(tokenizer, train_encodings, split_seqs["train"], args.top_n)
         alarms = compute_alarms(
             split_results["train"], args.high_1_token_threshold, args.high_unk_threshold,
             args.min_compression_benefit,
