@@ -192,6 +192,9 @@ class ForwardDataset(Dataset):
             "length": len(tokens),
         }
 
+    def __len__(self):
+        return len(self.seqs)
+
 
 class InverseDataset(Dataset):
     def __init__(self, df, emb_array, max_len=40, encode_fn=None):
@@ -209,6 +212,9 @@ class InverseDataset(Dataset):
             "target": torch.cat([token_tensor, torch.tensor([EOS_ID], dtype=torch.long)], dim=0),
             "length": len(tokens),
         }
+
+    def __len__(self):
+        return len(self.seqs)
 
 
 class PgenDataset(Dataset):
