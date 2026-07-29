@@ -6,7 +6,7 @@ pair, times training and inference wall-clock, and writes per-run results plus a
 mean +/- std summary across seeds.
 
 Usage:
-    python -m irrm_codec.compare_forward_tokenizers \
+    python scripts/compare_forward_tokenizers.py \
         --airr-path data/processed/trb_1M.tsv \
         --embeddings-path data/embeddings/trb_1M.parquet \
         --locus beta --max-len 40 \
