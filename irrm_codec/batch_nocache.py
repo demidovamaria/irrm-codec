@@ -80,6 +80,7 @@ def prepare_cached_training_data(args, logger=None, *, task, collate_fn, encode_
 
     logger.info("computing train-only standardizer")
     mean, std = compute_train_standardizer(emb, train_idx)
+    emb = (emb - mean) / std  # apply once, before slicing, so train/val/test share the same transform
 
     logger.info("building dataloaders task=%s", task)
     train_loader = build_dataloader(
