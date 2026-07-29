@@ -221,24 +221,77 @@ def write_markdown_table(summary, path):
     Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _load_completed_runs(csv_path):
+    """(tokenizer_path or None, seed) pairs already present in an existing raw_results.csv."""
+    if not csv_path.exists():
+        return set(), []
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        existing_rows = list(csv.DictReader(f))
+    completed = {
+        (row["tokenizer_path"] or None, int(row["seed"]))
+        for row in existing_rows
+    }
+    # csv.DictReader gives strings back; downstream code (summarize()) expects numeric fields
+    for row in existing_rows:
+        row["vocab_size"] = int(row["vocab_size"])
+        row["max_len"] = int(row["max_len"])
+        row["seed"] = int(row["seed"])
+        row["test_loss"] = float(row["test_loss"])
+        row["test_cosine"] = float(row["test_cosine"])
+        row["best_val_loss"] = float(row["best_val_loss"])
+        row["epochs_to_best_val"] = int(row["epochs_to_best_val"]) if row["epochs_to_best_val"] else None
+        row["train_time_sec"] = float(row["train_time_sec"])
+        row["inference_time_sec"] = float(row["inference_time_sec"])
+        row["num_parameters"] = int(row["num_parameters"])
+        row["tokenizer_path"] = row["tokenizer_path"] or None
+    return completed, existing_rows
+
+
+def _spec_key(spec):
+    """(tokenizer_path or None) identity used to match a --configs entry against a CSV row."""
+    if spec == "char":
+        return None
+    return spec.split(":", 1)[1]
+
+
 def main():
     args = parse_args()
     output_root = Path(args.output_root)
     output_root.mkdir(parents=True, exist_ok=True)
     logger = setup_logging(output_root / "benchmark.log")
 
-    rows = []
-    for spec in args.configs:
-        for seed in args.seeds:
-            logger.info("running config=%s seed=%d", spec, seed)
-            row = run_one(spec, seed, args, logger)
-            rows.append(row)
-            logger.info("done config=%s seed=%d test_loss=%.4f test_cosine=%.4f", spec, seed, row["test_loss"], row["test_cosine"])
+    csv_path = output_root / "raw_results.csv"
+    completed, rows = _load_completed_runs(csv_path)
+    if rows:
+        logger.info("resuming: %d run(s) already completed in %s", len(rows), csv_path)
 
-    with open(output_root / "raw_results.csv", "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=RESULT_FIELDS)
+    # Open once in append mode (or fresh with header) and flush after every row, so a
+    # killed/interrupted process only loses the run currently in flight, not prior ones.
+    write_header = not csv_path.exists()
+    csv_file = open(csv_path, "a", newline="", encoding="utf-8")
+    writer = csv.DictWriter(csv_file, fieldnames=RESULT_FIELDS)
+    if write_header:
         writer.writeheader()
-        writer.writerows(rows)
+        csv_file.flush()
+
+    try:
+        for spec in args.configs:
+            key_path = _spec_key(spec)
+            for seed in args.seeds:
+                if (key_path, seed) in completed:
+                    logger.info("skipping already-completed config=%s seed=%d", spec, seed)
+                    continue
+                logger.info("running config=%s seed=%d", spec, seed)
+                row = run_one(spec, seed, args, logger)
+                rows.append(row)
+                writer.writerow(row)
+                csv_file.flush()
+                logger.info(
+                    "done config=%s seed=%d test_loss=%.4f test_cosine=%.4f",
+                    spec, seed, row["test_loss"], row["test_cosine"],
+                )
+    finally:
+        csv_file.close()
 
     summary = summarize(rows)
     save_json(output_root / "summary.json", summary)
