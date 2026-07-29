@@ -1,8 +1,8 @@
 AA_VOCAB = {
     "<PAD>": 0,
-    "<BOS>": 1,
-    "<EOS>": 2,
-    "<UNK>": 3,
+    "<UNK>": 1,
+    "<BOS>": 2,
+    "<EOS>": 3,
     "-": 4,
     "A": 5,
     "C": 6,
@@ -32,6 +32,7 @@ PAD_ID = AA_VOCAB["<PAD>"]
 BOS_ID = AA_VOCAB["<BOS>"]
 EOS_ID = AA_VOCAB["<EOS>"]
 UNK_ID = AA_VOCAB["<UNK>"]
+SPECIAL_IDS = {PAD_ID, BOS_ID, EOS_ID, UNK_ID}
 GAP_TOKEN = "-"
 VALID_AA = set("ACDEFGHIKLMNPQRSTVWY")
 
@@ -86,10 +87,11 @@ def decode(tokens, stop_at_eos=True, remove_gaps=False):
     for token in tokens:
         if token == EOS_ID and stop_at_eos:
             break
-        if token <= UNK_ID:
+        if token in SPECIAL_IDS:
             continue
         decoded.append(ID2AA[token])
     sequence = "".join(decoded)
     if remove_gaps:
         return strip_gaps(sequence)
     return sequence
+
