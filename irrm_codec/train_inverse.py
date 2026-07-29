@@ -30,6 +30,11 @@ def parse_args():
     parser.add_argument("--locus", default="alpha")
     parser.add_argument("--clone-id-col", default="clone_id")
     parser.add_argument("--embedding-column", default="tcremp_emb")
+    # TODO: add --tokenizer-type/--tokenizer-path/--vocab-size (see irrm_codec/tokenizer_cli.py,
+    # already wired into train_forward.py) and pass encode_fn/vocab_size through to
+    # prepare_cached_training_data()/InverseModel() below. Deferred: blocked on the
+    # length_logits bug noted further down, and this script still imports batch_cache.py,
+    # whose CachedBatchDataset doesn't accept a custom encode_fn at all.
     parser.add_argument("--max-len", type=int, default=40)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--epochs", type=int, default=20)
@@ -48,6 +53,8 @@ def parse_args():
 
 
 def exact_match_rate(pred_tokens, target_tokens):
+    # TODO: decode() here is the char tokenizer. Once wordpiece support is wired in,
+    # swap for decode_wordpiece(ids, tokenizer) when --tokenizer-type=wordpiece.
     exact_matches = 0
     total = pred_tokens.size(0)
     for pred_row, target_row in zip(pred_tokens.tolist(), target_tokens.tolist()):
@@ -85,6 +92,12 @@ def run_epoch(model, loader, optimizer, device, stage, epoch, num_epochs, log_in
     for step, batch in enumerate(progress, start=1):
         emb, decoder_input, target, lengths, unk_fraction = move_to_device(batch, device)
         with torch.set_grad_enabled(is_train):
+            # TODO(pre-existing bug, unrelated to tokenizer integration): expects
+            # InverseModel.forward() to return (logits, length_logits) and inverse_loss/
+            # inverse_metrics to accept length_logits/lengths. Neither inverse_model.py
+            # nor losses.py define that today -> raises ValueError on any run. Same issue
+            # in model.generate() below (returns one tensor, not a (tokens, lengths) pair).
+            # Needs its own fix; deliberately left as-is here.
             logits, length_logits = model(emb, decoder_input)
             loss = inverse_loss(logits, target, length_logits, lengths)
             metrics = inverse_metrics(logits, target, length_logits, lengths)
