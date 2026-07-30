@@ -137,10 +137,12 @@ def run_one(spec, seed, args, logger):
 
     best_val_loss = float("inf")
     epochs_to_best_val = None
+    history = []
     train_start = time.perf_counter()
     for epoch in range(1, args.epochs + 1):
-        run_epoch(model, prepared["train_loader"], optimizer, device, "train", epoch, args.epochs, args.log_interval, False)
+        train_metrics = run_epoch(model, prepared["train_loader"], optimizer, device, "train", epoch, args.epochs, args.log_interval, False)
         val_metrics = run_epoch(model, prepared["val_loader"], None, device, "val", epoch, args.epochs, args.log_interval, False)
+        history.append({"epoch": epoch, "train": train_metrics, "val": val_metrics})
         if val_metrics["loss"] < best_val_loss:
             best_val_loss = val_metrics["loss"]
             epochs_to_best_val = epoch
@@ -148,6 +150,13 @@ def run_one(spec, seed, args, logger):
 
     test_metrics = run_epoch(model, prepared["test_loader"], None, device, "test", args.epochs, args.epochs, args.log_interval, False)
     inference_time_sec = _benchmark_inference(model, prepared["test_loader"], device, args.inference_repeats)
+
+    tokenizer_label = "char" if tokenizer_info["tokenizer_type"] == "char" else f"wordpiece_{vocab_size}"
+    history_dir = Path(args.output_root) / "history"
+    history_dir.mkdir(parents=True, exist_ok=True)
+    history_path = history_dir / f"{tokenizer_label}_seed{seed}.json"
+    save_json(history_path, history)
+    logger.info("wrote per-epoch history path=%s", history_path)
 
     return {
         "tokenizer": tokenizer_info["tokenizer_type"],
