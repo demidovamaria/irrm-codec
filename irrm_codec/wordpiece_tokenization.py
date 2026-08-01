@@ -54,6 +54,31 @@ def wordpiece_vocab_size(tokenizer) -> int:
     return tokenizer.get_vocab_size()
 
 
+def _rebuild_tokenizer_with_vocab(tokenizer: Tokenizer, kept_tokens: list) -> Tokenizer:
+    """Reassign contiguous ids (0..k-1) for kept_tokens (in their original relative order)
+    and build a new Tokenizer sharing everything except the vocab.
+
+    add_special_tokens() is required here: a freshly constructed Tokenizer(model) doesn't
+    know which of its vocab entries are "special" (that's tracked separately from
+    model.vocab) - without it, tokenizer.decode(ids, skip_special_tokens=True) silently
+    stops skipping PAD/UNK/BOS/EOS. Registering strings already present in the model's
+    vocab does not create new entries or change their ids.
+    """
+    new_vocab = {token: new_id for new_id, token in enumerate(kept_tokens)}
+    new_model = WordPiece(
+        new_vocab,
+        unk_token=tokenizer.model.unk_token,
+        continuing_subword_prefix=tokenizer.model.continuing_subword_prefix,
+        max_input_chars_per_word=tokenizer.model.max_input_chars_per_word,
+    )
+    filtered = Tokenizer(new_model)
+    filtered.normalizer = tokenizer.normalizer
+    filtered.pre_tokenizer = tokenizer.pre_tokenizer
+    filtered.decoder = tokenizer.decoder
+    filtered.add_special_tokens(list(_EXPECTED_SPECIAL_IDS.keys()))
+    return filtered
+
+
 def filter_vocab_by_max_token_length(tokenizer: Tokenizer, max_token_length: int) -> Tokenizer:
     """Drop vocab entries longer than max_token_length amino acids, keeping special tokens.
 
@@ -81,18 +106,7 @@ def filter_vocab_by_max_token_length(tokenizer: Tokenizer, max_token_length: int
         if len(piece) <= max_token_length:
             kept_tokens.append(token)
 
-    new_vocab = {token: new_id for new_id, token in enumerate(kept_tokens)}
-    new_model = WordPiece(
-        new_vocab,
-        unk_token=tokenizer.model.unk_token,
-        continuing_subword_prefix=prefix,
-        max_input_chars_per_word=tokenizer.model.max_input_chars_per_word,
-    )
-    filtered = Tokenizer(new_model)
-    filtered.normalizer = tokenizer.normalizer
-    filtered.pre_tokenizer = tokenizer.pre_tokenizer
-    filtered.decoder = tokenizer.decoder
-    return filtered
+    return _rebuild_tokenizer_with_vocab(tokenizer, kept_tokens)
 
 
 class WordpieceEncodeFn:
