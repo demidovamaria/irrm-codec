@@ -7,6 +7,7 @@ same ids irrm_codec.tokenization uses. A mismatched file raises ValueError.
 from pathlib import Path
 
 from tokenizers import Tokenizer
+from tokenizers.models import WordPiece
 
 from irrm_codec.tokenization import BOS_ID, EOS_ID, PAD_ID, UNK_ID
 
@@ -51,6 +52,47 @@ def decode_wordpiece(token_ids, tokenizer, stop_at_eos=True):
 def wordpiece_vocab_size(tokenizer) -> int:
     """Vocab size, for ForwardModel/InverseModel(vocab_size=...)."""
     return tokenizer.get_vocab_size()
+
+
+def filter_vocab_by_max_token_length(tokenizer: Tokenizer, max_token_length: int) -> Tokenizer:
+    """Drop vocab entries longer than max_token_length amino acids, keeping special tokens.
+
+    "Length" is the piece's real amino-acid count, i.e. the "##" continuation prefix isn't
+    counted. Remaining tokens get contiguous ids (0..k-1), with PAD/UNK/BOS/EOS staying at
+    0/1/2/3 since they're always kept and sorted first. Encoding after filtering just falls
+    back to shorter surviving pieces (WordPiece's normal longest-match behavior) - it does
+    not raise or produce extra [UNK] tokens by itself.
+
+    This does not touch the tokenizer.json file on disk or retrain anything - it only
+    rebuilds an in-memory Tokenizer with a smaller vocab for the current run.
+    """
+    if max_token_length < 1:
+        raise ValueError(f"max_token_length must be >= 1, got {max_token_length}.")
+
+    prefix = tokenizer.model.continuing_subword_prefix
+    old_vocab = tokenizer.get_vocab()
+
+    kept_tokens = []
+    for token, _old_id in sorted(old_vocab.items(), key=lambda kv: kv[1]):
+        if token in _EXPECTED_SPECIAL_IDS:
+            kept_tokens.append(token)
+            continue
+        piece = token[len(prefix):] if token.startswith(prefix) else token
+        if len(piece) <= max_token_length:
+            kept_tokens.append(token)
+
+    new_vocab = {token: new_id for new_id, token in enumerate(kept_tokens)}
+    new_model = WordPiece(
+        new_vocab,
+        unk_token=tokenizer.model.unk_token,
+        continuing_subword_prefix=prefix,
+        max_input_chars_per_word=tokenizer.model.max_input_chars_per_word,
+    )
+    filtered = Tokenizer(new_model)
+    filtered.normalizer = tokenizer.normalizer
+    filtered.pre_tokenizer = tokenizer.pre_tokenizer
+    filtered.decoder = tokenizer.decoder
+    return filtered
 
 
 class WordpieceEncodeFn:
