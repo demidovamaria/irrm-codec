@@ -1,3 +1,4 @@
 #!/bin/bash
+export PYTHONPATH="$PWD"
 bash scripts/run4a_individual_maxlen_maxtokenlen9_anchored.sh
 bash scripts/run4b_individual_maxlen_maxtokenlen9_anchored_dropout.sh

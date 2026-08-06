@@ -1,5 +1,6 @@
 #!/bin/bash
 set -e
+export PYTHONPATH="$PWD"
 
 python scripts/compare_forward_tokenizers.py \
   --airr-path data/raw/trb_background_100k.tsv \
