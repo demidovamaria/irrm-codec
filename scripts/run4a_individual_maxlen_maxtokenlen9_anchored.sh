@@ -13,7 +13,7 @@ python scripts/compare_forward_tokenizers.py \
 python scripts/compare_forward_tokenizers.py \
   --airr-path data/raw/trb_background_100k.tsv \
   --embeddings-path data/raw/trb_background_embeddings.parquet \
-  --locus beta --max-len 10 --batch-size 512 --epochs 40 \
+  --locus beta --max-len 11 --batch-size 512 --epochs 40 \
   --max-token-len 9 --pad-layout anchored \
   --seeds 1 \
   --configs wordpiece:artifacts/tokenizers_2026-08-01_fine_grid/wordpiece_vocab_1000/tokenizer.json \
@@ -22,7 +22,7 @@ python scripts/compare_forward_tokenizers.py \
 python scripts/compare_forward_tokenizers.py \
   --airr-path data/raw/trb_background_100k.tsv \
   --embeddings-path data/raw/trb_background_embeddings.parquet \
-  --locus beta --max-len 8 --batch-size 512 --epochs 40 \
+  --locus beta --max-len 10 --batch-size 512 --epochs 40 \
   --max-token-len 9 --pad-layout anchored \
   --seeds 1 \
   --configs wordpiece:artifacts/tokenizers_2026-08-01_fine_grid/wordpiece_vocab_2000/tokenizer.json \
@@ -33,17 +33,17 @@ python scripts/compare_forward_tokenizers.py \
             wordpiece:artifacts/tokenizers_2026-08-01_fine_grid/wordpiece_vocab_7000/tokenizer.json \
             wordpiece:artifacts/tokenizers_2026-08-01_fine_grid/wordpiece_vocab_8000/tokenizer.json \
             wordpiece:artifacts/tokenizers_2026-08-01_fine_grid/wordpiece_vocab_9000/tokenizer.json \
+            wordpiece:artifacts/tokenizers_2026-08-01_fine_grid/wordpiece_vocab_10000/tokenizer.json \
+            wordpiece:artifacts/tokenizers_2026-08-01_fine_grid/wordpiece_vocab_12000/tokenizer.json \
   --output-root artifacts/compare_forward_tokenizers_2026-08-01_fine_grid_individual_maxlen_maxtokenlen9_anchored_40epochs
 
 python scripts/compare_forward_tokenizers.py \
   --airr-path data/raw/trb_background_100k.tsv \
   --embeddings-path data/raw/trb_background_embeddings.parquet \
-  --locus beta --max-len 7 --batch-size 512 --epochs 40 \
+  --locus beta --max-len 9 --batch-size 512 --epochs 40 \
   --max-token-len 9 --pad-layout anchored \
   --seeds 1 \
-  --configs wordpiece:artifacts/tokenizers_2026-08-01_fine_grid/wordpiece_vocab_10000/tokenizer.json \
-            wordpiece:artifacts/tokenizers_2026-08-01_fine_grid/wordpiece_vocab_12000/tokenizer.json \
-            wordpiece:artifacts/tokenizers_2026-08-01_fine_grid/wordpiece_vocab_15000/tokenizer.json \
+  --configs wordpiece:artifacts/tokenizers_2026-08-01_fine_grid/wordpiece_vocab_15000/tokenizer.json \
             wordpiece:artifacts/tokenizers_2026-08-01_fine_grid/wordpiece_vocab_17000/tokenizer.json \
             wordpiece:artifacts/tokenizers_2026-08-01_fine_grid/wordpiece_vocab_20000/tokenizer.json \
   --output-root artifacts/compare_forward_tokenizers_2026-08-01_fine_grid_individual_maxlen_maxtokenlen9_anchored_40epochs

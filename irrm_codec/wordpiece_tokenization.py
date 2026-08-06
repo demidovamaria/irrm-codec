@@ -33,11 +33,18 @@ def load_wordpiece_tokenizer(path) -> Tokenizer:
 
 
 def encode_wordpiece(seq, tokenizer, max_len):
-    """Encode a CDR3 sequence into exactly max_len ids: truncated or PAD-padded at the end."""
+    """Encode a CDR3 sequence into exactly max_len ids: PAD-padded at the end.
+
+    Raises on overflow (matches encode_wordpiece_anchored and the char tokenizer's
+    gap_pad_cdr3) rather than silently truncating - a silently truncated sequence would
+    lose real information every epoch without any warning.
+    """
     seq = "" if seq is None else str(seq).strip().upper()
     if not seq:
         raise ValueError("Sequence must not be empty.")
-    ids = tokenizer.encode(seq).ids[:max_len]
+    ids = tokenizer.encode(seq).ids
+    if len(ids) > max_len:
+        raise ValueError(f"Sequence '{seq}' encodes to {len(ids)} WordPiece tokens, exceeds max_len={max_len}.")
     return ids + [PAD_ID] * (max_len - len(ids))
 
 
