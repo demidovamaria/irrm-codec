@@ -39,6 +39,7 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument("--dropout", type=float, default=0.2, help="Dropout used in ForwardModel's conv blocks and MLP head.")
     parser.add_argument("--train-fraction", type=float, default=0.8)
     parser.add_argument("--val-fraction", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
@@ -153,6 +154,7 @@ def main():
             vocab_size=vocab_size,
             output_dim=merge_stats["embedding_dim"],
             max_len=args.max_len,
+            dropout=args.dropout,
         ).to(device)
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
         num_parameters = sum(param.numel() for param in model.parameters())
