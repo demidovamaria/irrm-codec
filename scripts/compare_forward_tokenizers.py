@@ -50,7 +50,7 @@ from irrm_codec.wordpiece_tokenization import (
 )
 
 RESULT_FIELDS = [
-    "tokenizer", "vocab_size", "max_token_len", "max_len", "seed",
+    "tokenizer", "vocab_size", "max_token_len", "pad_layout", "max_len", "seed",
     "test_loss", "test_cosine", "best_val_loss", "epochs_to_best_val",
     "train_time_sec", "inference_time_sec", "num_parameters", "tokenizer_path",
 ]
@@ -68,6 +68,7 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument("--dropout", type=float, default=0.2, help="Dropout used in ForwardModel's conv blocks and MLP head.")
     parser.add_argument("--train-fraction", type=float, default=0.8)
     parser.add_argument("--val-fraction", type=float, default=0.1)
     parser.add_argument("--num-workers", type=int, default=0)
@@ -82,6 +83,17 @@ def parse_args():
         "(the original vocab is used as-is). Does not touch tokenizer.json files or char "
         "configs - filtering happens per-run, in this script only, not in tokenizer training.",
     )
+    parser.add_argument(
+        "--pad-layout",
+        choices=["end", "anchored"],
+        default="end",
+        help="'end' (default): pad after the real tokens, as before. 'anchored': keep the "
+        "first --left-anchor and last --right-anchor tokens at fixed buffer positions and "
+        "put all padding between them, so the (conserved) sequence ends land on the same "
+        "position across every example. WordPiece configs only - char is unaffected.",
+    )
+    parser.add_argument("--left-anchor", type=int, default=1, help="Only used with --pad-layout anchored.")
+    parser.add_argument("--right-anchor", type=int, default=1, help="Only used with --pad-layout anchored.")
     parser.add_argument("--seeds", type=int, nargs="+", default=[1, 42, 777])
     parser.add_argument(
         "--configs",
@@ -129,23 +141,29 @@ def run_one(spec, seed, args, logger):
     device = choose_device()
 
     tokenizer_args = _tokenizer_args_from_spec(spec)
-    if args.max_token_len is not None and tokenizer_args.tokenizer_type == "wordpiece":
+    needs_custom_handling = tokenizer_args.tokenizer_type == "wordpiece" and (
+        args.max_token_len is not None or args.pad_layout != "end"
+    )
+    if needs_custom_handling:
         tokenizer = load_wordpiece_tokenizer(tokenizer_args.tokenizer_path)
         original_vocab_size = wordpiece_vocab_size(tokenizer)
-        tokenizer = filter_vocab_by_max_token_length(tokenizer, args.max_token_len)
+        if args.max_token_len is not None:
+            tokenizer = filter_vocab_by_max_token_length(tokenizer, args.max_token_len)
         vocab_size = wordpiece_vocab_size(tokenizer)
-        encode_fn = WordpieceEncodeFn(tokenizer)
+        encode_fn = WordpieceEncodeFn(
+            tokenizer, pad_layout=args.pad_layout, left_anchor=args.left_anchor, right_anchor=args.right_anchor
+        )
         tokenizer_info = {
             "tokenizer_type": "wordpiece",
             "tokenizer_path": tokenizer_args.tokenizer_path,
             "vocab_size": vocab_size,
         }
         logger.info(
-            "tokenizer_type=wordpiece vocab_size=%d (filtered from %d by max_token_len=%d) tokenizer_path=%s",
-            vocab_size, original_vocab_size, args.max_token_len, tokenizer_args.tokenizer_path,
+            "tokenizer_type=wordpiece vocab_size=%d (from %d, max_token_len=%s) pad_layout=%s tokenizer_path=%s",
+            vocab_size, original_vocab_size, args.max_token_len, args.pad_layout, tokenizer_args.tokenizer_path,
         )
     else:
-        # char, or wordpiece with no --max-token-len: unfiltered, shared with train_forward.py/train_inverse.py
+        # char, or wordpiece with every new option left at default: unchanged, shared with train_forward.py/train_inverse.py
         encode_fn, vocab_size, tokenizer_info = resolve_tokenizer(tokenizer_args, logger)
 
     data_args = argparse.Namespace(
@@ -168,6 +186,7 @@ def run_one(spec, seed, args, logger):
         vocab_size=vocab_size,
         output_dim=prepared["merge_stats"]["embedding_dim"],
         max_len=args.max_len,
+        dropout=args.dropout,
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
@@ -188,12 +207,14 @@ def run_one(spec, seed, args, logger):
     inference_time_sec = _benchmark_inference(model, prepared["test_loader"], device, args.inference_repeats)
 
     row_max_token_len = args.max_token_len if tokenizer_info["tokenizer_type"] == "wordpiece" else None
+    row_pad_layout = args.pad_layout if tokenizer_info["tokenizer_type"] == "wordpiece" else "end"
 
     tokenizer_label = "char" if tokenizer_info["tokenizer_type"] == "char" else f"wordpiece_{vocab_size}"
     filter_suffix = f"_n{row_max_token_len}" if row_max_token_len is not None else ""
+    layout_suffix = f"_{row_pad_layout}" if row_pad_layout != "end" else ""
     history_dir = Path(args.output_root) / "history"
     history_dir.mkdir(parents=True, exist_ok=True)
-    history_path = history_dir / f"{tokenizer_label}{filter_suffix}_seed{seed}.json"
+    history_path = history_dir / f"{tokenizer_label}{filter_suffix}{layout_suffix}_seed{seed}.json"
     save_json(history_path, history)
     logger.info("wrote per-epoch history path=%s", history_path)
 
@@ -201,6 +222,7 @@ def run_one(spec, seed, args, logger):
         "tokenizer": tokenizer_info["tokenizer_type"],
         "vocab_size": tokenizer_info["vocab_size"],
         "max_token_len": row_max_token_len,
+        "pad_layout": row_pad_layout,
         "max_len": args.max_len,
         "seed": seed,
         "test_loss": test_metrics["loss"],
@@ -224,20 +246,21 @@ def _mean_std(values):
 
 
 def summarize(rows):
-    """One aggregated row per (tokenizer, vocab_size, max_token_len), mean +/- std across seeds."""
+    """One aggregated row per (tokenizer, vocab_size, max_token_len, pad_layout), mean +/- std across seeds."""
     groups = {}
     for row in rows:
-        key = (row["tokenizer"], row["vocab_size"], row["max_token_len"])
+        key = (row["tokenizer"], row["vocab_size"], row["max_token_len"], row.get("pad_layout", "end"))
         groups.setdefault(key, []).append(row)
 
     summary = []
-    for (tokenizer, vocab_size, max_token_len), group_rows in sorted(
-        groups.items(), key=lambda kv: (kv[0][0], kv[0][1] or 0, kv[0][2] or 0)
+    for (tokenizer, vocab_size, max_token_len, pad_layout), group_rows in sorted(
+        groups.items(), key=lambda kv: (kv[0][0], kv[0][1] or 0, kv[0][2] or 0, kv[0][3])
     ):
         summary.append({
             "tokenizer": tokenizer,
             "vocab_size": vocab_size,
             "max_token_len": max_token_len,
+            "pad_layout": pad_layout,
             "max_len": group_rows[0]["max_len"],
             "n_seeds": len(group_rows),
             "test_loss": _mean_std([r["test_loss"] for r in group_rows]),
@@ -258,15 +281,15 @@ def _fmt(mean_std, precision=4):
 
 def write_markdown_table(summary, path):
     lines = [
-        "| tokenizer | vocab_size | max_token_len | max_len | test_loss | test_cosine | best_val_loss | "
+        "| tokenizer | vocab_size | max_token_len | pad_layout | max_len | test_loss | test_cosine | best_val_loss | "
         "epochs_to_best_val | train_time_sec | inference_time_sec | num_parameters | notes |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for row in summary:
         notes = f"n={row['n_seeds']} seeds"
         max_token_len = row["max_token_len"] if row["max_token_len"] is not None else "-"
         lines.append(
-            f"| {row['tokenizer']} | {row['vocab_size']} | {max_token_len} | {row['max_len']} | "
+            f"| {row['tokenizer']} | {row['vocab_size']} | {max_token_len} | {row['pad_layout']} | {row['max_len']} | "
             f"{_fmt(row['test_loss'])} | {_fmt(row['test_cosine'])} | {_fmt(row['best_val_loss'])} | "
             f"{_fmt(row['epochs_to_best_val'], precision=1)} | {_fmt(row['train_time_sec'], precision=1)} | "
             f"{_fmt(row['inference_time_sec'], precision=3)} | {row['num_parameters']} | {notes} |"
@@ -275,20 +298,26 @@ def write_markdown_table(summary, path):
 
 
 def _load_completed_runs(csv_path):
-    """(tokenizer_path or None, max_token_len, seed) triples already present in raw_results.csv."""
+    """(tokenizer_path or None, max_token_len, pad_layout, seed) tuples already present in raw_results.csv."""
     if not csv_path.exists():
         return set(), []
     with open(csv_path, newline="", encoding="utf-8") as f:
         existing_rows = list(csv.DictReader(f))
-    # .get(..., "") covers resuming from a CSV written before --max-token-len existed
+    # .get(..., default) covers resuming from a CSV written before --max-token-len/--pad-layout existed
     completed = {
-        (row["tokenizer_path"] or None, int(row["max_token_len"]) if row.get("max_token_len") else None, int(row["seed"]))
+        (
+            row["tokenizer_path"] or None,
+            int(row["max_token_len"]) if row.get("max_token_len") else None,
+            row.get("pad_layout") or "end",
+            int(row["seed"]),
+        )
         for row in existing_rows
     }
     # csv.DictReader gives strings back; downstream code (summarize()) expects numeric fields
     for row in existing_rows:
         row["vocab_size"] = int(row["vocab_size"])
         row["max_token_len"] = int(row["max_token_len"]) if row.get("max_token_len") else None
+        row["pad_layout"] = row.get("pad_layout") or "end"
         row["max_len"] = int(row["max_len"])
         row["seed"] = int(row["seed"])
         row["test_loss"] = float(row["test_loss"])
@@ -303,11 +332,11 @@ def _load_completed_runs(csv_path):
 
 
 def _spec_key(spec, args):
-    """(tokenizer_path or None, max_token_len) identity matched against a CSV row."""
+    """(tokenizer_path or None, max_token_len, pad_layout) identity matched against a CSV row."""
     if spec == "char":
-        return None, None
+        return None, None, "end"
     path = spec.split(":", 1)[1]
-    return path, args.max_token_len
+    return path, args.max_token_len, args.pad_layout
 
 
 def main():
