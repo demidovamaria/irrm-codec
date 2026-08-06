@@ -33,12 +33,48 @@ def load_wordpiece_tokenizer(path) -> Tokenizer:
 
 
 def encode_wordpiece(seq, tokenizer, max_len):
-    """Encode a CDR3 sequence into exactly max_len ids: truncated or PAD-padded."""
+    """Encode a CDR3 sequence into exactly max_len ids: truncated or PAD-padded at the end."""
     seq = "" if seq is None else str(seq).strip().upper()
     if not seq:
         raise ValueError("Sequence must not be empty.")
     ids = tokenizer.encode(seq).ids[:max_len]
     return ids + [PAD_ID] * (max_len - len(ids))
+
+
+def encode_wordpiece_anchored(seq, tokenizer, max_len, left_anchor=1, right_anchor=1):
+    """Encode a CDR3 sequence, with padding split into the middle instead of the end.
+
+    Keeps the first left_anchor and last right_anchor tokens at fixed offsets from the
+    start/end of the buffer, and inserts all padding between them - e.g. for
+    left_anchor=1, right_anchor=1: [tok0, PAD, PAD, ..., PAD, tok_{-1}]. The idea: the
+    convolutional ForwardModel is position-sensitive, and the N-/C-terminal ends of a CDR3
+    are its most conserved regions (see the WordPiece longest-token analysis earlier in
+    this project) - with end-padding those ends land on a different absolute position in
+    every example (depending on how long the encoded sequence happens to be), while
+    anchoring keeps them at a fixed position always, mirroring what gap_pad_cdr3() already
+    does for the char tokenizer (there with actual gap characters; here with real PAD_ID,
+    still excluded from mean_pool/max_pool by the model's mask).
+
+    Falls back to plain end-padding if there's no room for both anchors plus padding
+    (short sequences, or left_anchor+right_anchor >= sequence length).
+    """
+    seq = "" if seq is None else str(seq).strip().upper()
+    if not seq:
+        raise ValueError("Sequence must not be empty.")
+    ids = tokenizer.encode(seq).ids
+    if len(ids) > max_len:
+        raise ValueError(f"Sequence '{seq}' encodes to {len(ids)} WordPiece tokens, exceeds max_len={max_len}.")
+
+    pad_total = max_len - len(ids)
+    if pad_total == 0 or len(ids) <= left_anchor + right_anchor:
+        return ids + [PAD_ID] * pad_total
+
+    left = ids[:left_anchor]
+    right = ids[len(ids) - right_anchor:]
+    middle = ids[left_anchor: len(ids) - right_anchor]
+    pad_left = pad_total // 2
+    pad_right = pad_total - pad_left
+    return left + [PAD_ID] * pad_left + middle + [PAD_ID] * pad_right + right
 
 
 def decode_wordpiece(token_ids, tokenizer, stop_at_eos=True):
@@ -110,10 +146,21 @@ def filter_vocab_by_max_token_length(tokenizer: Tokenizer, max_token_length: int
 
 
 class WordpieceEncodeFn:
-    """Binds a tokenizer to encode_wordpiece so it matches datasets.py's encode_fn(seq, max_len)."""
+    """Binds a tokenizer to an encode_* function matching datasets.py's encode_fn(seq, max_len).
 
-    def __init__(self, tokenizer):
+    pad_layout="end" (default) uses encode_wordpiece - unchanged from before this option
+    existed. pad_layout="anchored" uses encode_wordpiece_anchored instead.
+    """
+
+    def __init__(self, tokenizer, pad_layout="end", left_anchor=1, right_anchor=1):
+        if pad_layout not in ("end", "anchored"):
+            raise ValueError(f"pad_layout must be 'end' or 'anchored', got {pad_layout!r}.")
         self.tokenizer = tokenizer
+        self.pad_layout = pad_layout
+        self.left_anchor = left_anchor
+        self.right_anchor = right_anchor
 
     def __call__(self, seq, max_len):
-        return encode_wordpiece(seq, self.tokenizer, max_len)
+        if self.pad_layout == "end":
+            return encode_wordpiece(seq, self.tokenizer, max_len)
+        return encode_wordpiece_anchored(seq, self.tokenizer, max_len, self.left_anchor, self.right_anchor)
