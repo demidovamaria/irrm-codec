@@ -40,6 +40,11 @@ def parse_args():
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--dropout", type=float, default=0.2, help="Dropout used in ForwardModel's conv blocks and MLP head.")
+    parser.add_argument("--hidden-dim", type=int, default=192, help="Width of ForwardModel's conv blocks.")
+    parser.add_argument(
+        "--num-conv-blocks", type=int, default=4,
+        help="Depth: number of dilated conv blocks. Dilations are 2**0, 2**1, ..., 2**(n-1) (default 4 -> 1,2,4,8).",
+    )
     parser.add_argument("--train-fraction", type=float, default=0.8)
     parser.add_argument("--val-fraction", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
@@ -155,6 +160,8 @@ def main():
             output_dim=merge_stats["embedding_dim"],
             max_len=args.max_len,
             dropout=args.dropout,
+            hidden_dim=args.hidden_dim,
+            dilations=tuple(2**i for i in range(args.num_conv_blocks)),
         ).to(device)
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
         num_parameters = sum(param.numel() for param in model.parameters())

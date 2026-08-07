@@ -49,8 +49,11 @@ from irrm_codec.wordpiece_tokenization import (
     wordpiece_vocab_size,
 )
 
+DEFAULT_HIDDEN_DIM = 192
+DEFAULT_NUM_CONV_BLOCKS = 4
+
 RESULT_FIELDS = [
-    "tokenizer", "vocab_size", "max_token_len", "pad_layout", "max_len", "seed",
+    "tokenizer", "vocab_size", "max_token_len", "pad_layout", "hidden_dim", "num_conv_blocks", "max_len", "seed",
     "test_loss", "test_cosine", "best_val_loss", "epochs_to_best_val",
     "train_time_sec", "inference_time_sec", "num_parameters", "tokenizer_path",
 ]
@@ -69,6 +72,11 @@ def parse_args():
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--dropout", type=float, default=0.2, help="Dropout used in ForwardModel's conv blocks and MLP head.")
+    parser.add_argument("--hidden-dim", type=int, default=192, help="Width of ForwardModel's conv blocks.")
+    parser.add_argument(
+        "--num-conv-blocks", type=int, default=4,
+        help="Depth: number of dilated conv blocks. Dilations are 2**0, 2**1, ..., 2**(n-1) (default 4 -> 1,2,4,8).",
+    )
     parser.add_argument("--train-fraction", type=float, default=0.8)
     parser.add_argument("--val-fraction", type=float, default=0.1)
     parser.add_argument("--num-workers", type=int, default=0)
@@ -187,6 +195,8 @@ def run_one(spec, seed, args, logger):
         output_dim=prepared["merge_stats"]["embedding_dim"],
         max_len=args.max_len,
         dropout=args.dropout,
+        hidden_dim=args.hidden_dim,
+        dilations=tuple(2**i for i in range(args.num_conv_blocks)),
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
@@ -212,9 +222,17 @@ def run_one(spec, seed, args, logger):
     tokenizer_label = "char" if tokenizer_info["tokenizer_type"] == "char" else f"wordpiece_{vocab_size}"
     filter_suffix = f"_n{row_max_token_len}" if row_max_token_len is not None else ""
     layout_suffix = f"_{row_pad_layout}" if row_pad_layout != "end" else ""
+    # Architecture applies to every tokenizer (char included) - only stamp the filename
+    # when it differs from ForwardModel's own defaults, so default-architecture runs keep
+    # producing the exact same filenames as before this option existed (resume stays intact).
+    arch_suffix = (
+        f"_h{args.hidden_dim}_d{args.num_conv_blocks}"
+        if (args.hidden_dim != DEFAULT_HIDDEN_DIM or args.num_conv_blocks != DEFAULT_NUM_CONV_BLOCKS)
+        else ""
+    )
     history_dir = Path(args.output_root) / "history"
     history_dir.mkdir(parents=True, exist_ok=True)
-    history_path = history_dir / f"{tokenizer_label}{filter_suffix}{layout_suffix}_seed{seed}.json"
+    history_path = history_dir / f"{tokenizer_label}{filter_suffix}{layout_suffix}{arch_suffix}_seed{seed}.json"
     save_json(history_path, history)
     logger.info("wrote per-epoch history path=%s", history_path)
 
@@ -223,6 +241,8 @@ def run_one(spec, seed, args, logger):
         "vocab_size": tokenizer_info["vocab_size"],
         "max_token_len": row_max_token_len,
         "pad_layout": row_pad_layout,
+        "hidden_dim": args.hidden_dim,
+        "num_conv_blocks": args.num_conv_blocks,
         "max_len": args.max_len,
         "seed": seed,
         "test_loss": test_metrics["loss"],
@@ -246,21 +266,27 @@ def _mean_std(values):
 
 
 def summarize(rows):
-    """One aggregated row per (tokenizer, vocab_size, max_token_len, pad_layout), mean +/- std across seeds."""
+    """One aggregated row per (tokenizer, vocab_size, max_token_len, pad_layout, hidden_dim,
+    num_conv_blocks), mean +/- std across seeds."""
     groups = {}
     for row in rows:
-        key = (row["tokenizer"], row["vocab_size"], row["max_token_len"], row.get("pad_layout", "end"))
+        key = (
+            row["tokenizer"], row["vocab_size"], row["max_token_len"], row.get("pad_layout", "end"),
+            row.get("hidden_dim", DEFAULT_HIDDEN_DIM), row.get("num_conv_blocks", DEFAULT_NUM_CONV_BLOCKS),
+        )
         groups.setdefault(key, []).append(row)
 
     summary = []
-    for (tokenizer, vocab_size, max_token_len, pad_layout), group_rows in sorted(
-        groups.items(), key=lambda kv: (kv[0][0], kv[0][1] or 0, kv[0][2] or 0, kv[0][3])
+    for (tokenizer, vocab_size, max_token_len, pad_layout, hidden_dim, num_conv_blocks), group_rows in sorted(
+        groups.items(), key=lambda kv: (kv[0][0], kv[0][1] or 0, kv[0][2] or 0, kv[0][3], kv[0][4], kv[0][5])
     ):
         summary.append({
             "tokenizer": tokenizer,
             "vocab_size": vocab_size,
             "max_token_len": max_token_len,
             "pad_layout": pad_layout,
+            "hidden_dim": hidden_dim,
+            "num_conv_blocks": num_conv_blocks,
             "max_len": group_rows[0]["max_len"],
             "n_seeds": len(group_rows),
             "test_loss": _mean_std([r["test_loss"] for r in group_rows]),
@@ -281,15 +307,17 @@ def _fmt(mean_std, precision=4):
 
 def write_markdown_table(summary, path):
     lines = [
-        "| tokenizer | vocab_size | max_token_len | pad_layout | max_len | test_loss | test_cosine | best_val_loss | "
+        "| tokenizer | vocab_size | max_token_len | pad_layout | hidden_dim | num_conv_blocks | max_len | "
+        "test_loss | test_cosine | best_val_loss | "
         "epochs_to_best_val | train_time_sec | inference_time_sec | num_parameters | notes |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for row in summary:
         notes = f"n={row['n_seeds']} seeds"
         max_token_len = row["max_token_len"] if row["max_token_len"] is not None else "-"
         lines.append(
-            f"| {row['tokenizer']} | {row['vocab_size']} | {max_token_len} | {row['pad_layout']} | {row['max_len']} | "
+            f"| {row['tokenizer']} | {row['vocab_size']} | {max_token_len} | {row['pad_layout']} | "
+            f"{row['hidden_dim']} | {row['num_conv_blocks']} | {row['max_len']} | "
             f"{_fmt(row['test_loss'])} | {_fmt(row['test_cosine'])} | {_fmt(row['best_val_loss'])} | "
             f"{_fmt(row['epochs_to_best_val'], precision=1)} | {_fmt(row['train_time_sec'], precision=1)} | "
             f"{_fmt(row['inference_time_sec'], precision=3)} | {row['num_parameters']} | {notes} |"
@@ -298,17 +326,20 @@ def write_markdown_table(summary, path):
 
 
 def _load_completed_runs(csv_path):
-    """(tokenizer_path or None, max_token_len, pad_layout, seed) tuples already present in raw_results.csv."""
+    """(tokenizer_path or None, max_token_len, pad_layout, hidden_dim, num_conv_blocks, seed) tuples
+    already present in raw_results.csv."""
     if not csv_path.exists():
         return set(), []
     with open(csv_path, newline="", encoding="utf-8") as f:
         existing_rows = list(csv.DictReader(f))
-    # .get(..., default) covers resuming from a CSV written before --max-token-len/--pad-layout existed
+    # .get(..., default) covers resuming from a CSV written before these columns existed
     completed = {
         (
             row["tokenizer_path"] or None,
             int(row["max_token_len"]) if row.get("max_token_len") else None,
             row.get("pad_layout") or "end",
+            int(row["hidden_dim"]) if row.get("hidden_dim") else DEFAULT_HIDDEN_DIM,
+            int(row["num_conv_blocks"]) if row.get("num_conv_blocks") else DEFAULT_NUM_CONV_BLOCKS,
             int(row["seed"]),
         )
         for row in existing_rows
@@ -318,6 +349,8 @@ def _load_completed_runs(csv_path):
         row["vocab_size"] = int(row["vocab_size"])
         row["max_token_len"] = int(row["max_token_len"]) if row.get("max_token_len") else None
         row["pad_layout"] = row.get("pad_layout") or "end"
+        row["hidden_dim"] = int(row["hidden_dim"]) if row.get("hidden_dim") else DEFAULT_HIDDEN_DIM
+        row["num_conv_blocks"] = int(row["num_conv_blocks"]) if row.get("num_conv_blocks") else DEFAULT_NUM_CONV_BLOCKS
         row["max_len"] = int(row["max_len"])
         row["seed"] = int(row["seed"])
         row["test_loss"] = float(row["test_loss"])
@@ -332,11 +365,12 @@ def _load_completed_runs(csv_path):
 
 
 def _spec_key(spec, args):
-    """(tokenizer_path or None, max_token_len, pad_layout) identity matched against a CSV row."""
+    """(tokenizer_path or None, max_token_len, pad_layout, hidden_dim, num_conv_blocks) identity
+    matched against a CSV row."""
     if spec == "char":
-        return None, None, "end"
+        return None, None, "end", args.hidden_dim, args.num_conv_blocks
     path = spec.split(":", 1)[1]
-    return path, args.max_token_len, args.pad_layout
+    return path, args.max_token_len, args.pad_layout, args.hidden_dim, args.num_conv_blocks
 
 
 def main():
